@@ -138,8 +138,8 @@ def prepare_text_image(text, size, color, target_w, f_path):
     return txt_img
 
 # --- 5. 状態管理 ---
-canvas_key = f"v15_{uploaded_file.name if uploaded_file else 'n'}_{selected_size}_{selected_frame_key}_{selected_font_name}_{use_shadow}"
-if reset_layout: st.rerun()
+# 💡 背景色（bg_color）が変わった時も、画面を強制的に書き換えるようにします
+canvas_key = f"v16_{uploaded_file.name if uploaded_file else 'n'}_{selected_size}_{selected_frame_key}_{selected_font_name}_{use_shadow}_{bg_color}"
 
 objects_list = []
 if uploaded_file:
