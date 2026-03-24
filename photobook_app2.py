@@ -6,7 +6,7 @@ import os
 import base64
 
 # ==========================================
-# 🚨 エラー回避パッチ
+# 🚨 エラー回避パッチ（ここはそのままでOK）
 # ==========================================
 import streamlit.elements.image as st_image
 import streamlit.elements.lib.image_utils as image_utils
@@ -73,11 +73,15 @@ with st.sidebar:
     text_size = st.slider("文字のサイズ", 10, 120, 45)
     text_preset = st.selectbox("文字の色", list(PRESET_TEXT_COLORS.keys()))
     text_color = PRESET_TEXT_COLORS[text_preset]
+    
+    st.divider()
+    if st.button("🔄 画面を強制リセット"):
+        st.rerun()
 
-# --- 4. 画像生成 ---
+# --- 4. 画像生成（背景＋枠） ---
 st.title("📱 メモリアルフォト＆メッセージ")
 
-# 台紙と枠の合成
+# 台紙と枠を1枚の画像に合成
 base_paper = Image.new("RGBA", (int(W), int(H)), bg_color)
 if frame_path:
     full_frame_path = os.path.join(os.path.dirname(__file__), frame_path)
@@ -85,7 +89,7 @@ if frame_path:
         waku = Image.open(full_frame_path).convert("RGBA").resize((int(W), int(H)))
         base_paper = Image.alpha_composite(base_paper, waku)
 
-# オブジェクトリスト作成
+# 初期の配置物リスト作成
 objects_list = []
 if uploaded_file:
     p_img = Image.open(uploaded_file).convert("RGBA")
@@ -101,36 +105,36 @@ if user_text:
         "left": int((W-t_img.width)//2), "top": int(H*0.75)
     })
 
-# キャンバス表示（鍵を更新して強制リフレッシュ）
+# --- 5. キャンバスの鍵（ここが最重要！） ---
+# 背景色、枠、サイズ、写真の有無、文字の有無が変わるたびに、鍵（key）を完全に変えます
 clean_bg = bg_color.replace('#', '')
-c_key = f"v25_{clean_bg}_{selected_frame_key}_{selected_size}_{'y' if uploaded_file else 'n'}"
+c_key = f"canvas_final_{clean_bg}_{selected_frame_key}_{selected_size}_{'y' if uploaded_file else 'n'}_{len(user_text)}"
 
 canvas_result = st_canvas(
-    fill_color="rgba(255, 255, 255, 0)", background_image=base_paper,
+    fill_color="rgba(255, 255, 255, 0)",
+    background_image=base_paper,
     initial_drawing={"objects": objects_list} if objects_list else None,
-    height=int(H), width=int(W), drawing_mode="transform", key=c_key,
+    height=int(H), width=int(W),
+    drawing_mode="transform",
+    key=c_key, # 👈 この鍵が新しくなると、上の画面が強制的に描き直されます
 )
 
-# --- 5. 確定と保存 ---
+# --- 6. 確定と保存 ---
 st.divider()
 if st.button("✨ デザインを確定する", use_container_width=True, type="primary"):
     if canvas_result.image_data is not None:
+        # キャンバス上の写真や文字を取り出す
         final_layer = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
+        # 背景（base_paper）の上に重ねる
         complete_page = Image.alpha_composite(base_paper, final_layer)
         
         st.success("✅ 準備完了！保存ボタンを押してください。")
         c1, c2 = st.columns(2)
         
-        # JPEG保存用
         buf_j = io.BytesIO()
         complete_page.convert("RGB").save(buf_j, format="JPEG", quality=95)
         c1.download_button("📥 通常保存 (JPEG)", buf_j.getvalue(), "memorial.jpg", "image/jpeg", use_container_width=True)
         
-        # PDF保存用
         buf_p = io.BytesIO()
         complete_page.convert("RGB").save(buf_p, format="PDF", resolution=100.0)
         c2.download_button("📥 高画質保存 (PDF)", buf_p.getvalue(), "memorial.pdf", "application/pdf", use_container_width=True)
-
-# デバッグ用プレビュー
-with st.expander("🔍 内部合成状態の確認"):
-    st.image(base_paper, caption="背景と枠の合成（この上に写真と文字が乗ります）", width=300)
