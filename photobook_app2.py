@@ -24,7 +24,7 @@ def patched_image_to_url(image, width_or_config, *args, **kwargs):
 st_image.image_to_url = patched_image_to_url
 image_utils.image_to_url = patched_image_to_url
 
-# --- 1. 定数・色定義 ---
+# --- 定数 ---
 PAPER_SIZES = {
     "2L版 (127x178mm)": (600, 840),
     "L版 (89x127mm)": (420, 600),
@@ -57,74 +57,64 @@ FONTS = {
 
 st.set_page_config(page_title="プロ・メモリアルエディタ", layout="wide")
 
-# --- 2. 便利関数 ---
-def pil_to_base64_url(img: Image.Image) -> str:
-    """PIL画像をdata URL（base64）に変換"""
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    b64 = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/png;base64,{b64}"
-
-def get_script_dir() -> str:
+# --- ユーティリティ ---
+def get_script_dir():
     try:
         return os.path.dirname(os.path.abspath(__file__))
     except Exception:
         return os.getcwd()
 
-def build_base_paper(W: int, H: int, bg_rgb: tuple, frame_path: str | None) -> Image.Image:
-    """背景色と枠を合成したベース画像を生成"""
-    # RGBタプルで確実に色を指定
-    base = Image.new("RGBA", (W, H), (*bg_rgb, 255))
+def pil_to_b64(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
+def pil_to_data_url(img: Image.Image) -> str:
+    return f"data:image/png;base64,{pil_to_b64(img)}"
+
+def build_base_paper(W, H, bg_rgb, frame_path):
+    """背景色 + 枠を合成したPIL画像を返す"""
+    base = Image.new("RGBA", (W, H), (*bg_rgb, 255))
     if frame_path:
-        full_frame_path = os.path.join(get_script_dir(), frame_path)
-        if os.path.exists(full_frame_path):
+        full_path = os.path.join(get_script_dir(), frame_path)
+        if os.path.exists(full_path):
             try:
-                waku = Image.open(full_frame_path).convert("RGBA").resize((W, H), Image.LANCZOS)
+                waku = Image.open(full_path).convert("RGBA").resize((W, H), Image.LANCZOS)
                 base = Image.alpha_composite(base, waku)
             except Exception as e:
-                st.warning(f"枠の読み込みに失敗しました: {e}")
+                st.warning(f"枠読み込みエラー: {e}")
         else:
-            st.warning(f"枠ファイルが見つかりません: {full_frame_path}")
-
+            st.warning(f"枠ファイルが見つかりません: {full_path}")
     return base
 
-def prepare_text_image(text: str, size: int, color: str, target_w: int, f_path: str) -> Image.Image:
-    """テキストをPIL画像（RGBA）に変換"""
+def prepare_text_image(text, size, color, target_w, f_path):
     font_full_path = os.path.join(get_script_dir(), f_path)
     try:
         font = ImageFont.truetype(font_full_path, size) if os.path.exists(font_full_path) else ImageFont.load_default()
     except Exception:
         font = ImageFont.load_default()
-
-    dummy_img = Image.new("RGBA", (int(target_w), 500))
-    dummy_draw = ImageDraw.Draw(dummy_img)
-    bbox = dummy_draw.multiline_textbbox((0, 0), text, font=font, align="center")
-    tw = int(bbox[2] - bbox[0] + 60)
-    th = int(bbox[3] - bbox[1] + 60)
-
-    txt_img = Image.new("RGBA", (max(tw, 100), max(th, 50)), (0, 0, 0, 0))
-    txt_draw = ImageDraw.Draw(txt_img)
-    txt_draw.multiline_text(
-        (tw // 2, th // 2), text, font=font,
-        fill=color, anchor="mm", align="center"
+    dummy = Image.new("RGBA", (int(target_w), 500))
+    dd = ImageDraw.Draw(dummy)
+    bbox = dd.multiline_textbbox((0, 0), text, font=font, align="center")
+    tw, th = int(bbox[2]-bbox[0]+60), int(bbox[3]-bbox[1]+60)
+    txt_img = Image.new("RGBA", (max(tw,100), max(th,50)), (0,0,0,0))
+    ImageDraw.Draw(txt_img).multiline_text(
+        (tw//2, th//2), text, font=font, fill=color, anchor="mm", align="center"
     )
     return txt_img
 
-# --- 3. サイドバー設定 ---
+# ========== サイドバー ==========
 with st.sidebar:
     st.header("📋 基本設定")
     selected_size = st.selectbox("出力サイズ", list(PAPER_SIZES.keys()))
     W, H = PAPER_SIZES[selected_size]
-
     selected_frame_key = st.radio("装飾枠の選択", list(FRAME_FILES.keys()))
     frame_path = FRAME_FILES[selected_frame_key]
-
     bg_preset = st.selectbox("背景色", list(PRESET_BG_COLORS.keys()))
     bg_rgb = PRESET_BG_COLORS[bg_preset]
 
     st.header("📸 写真の設定")
-    uploaded_file = st.file_uploader("写真をアップロード", type=["jpg", "png", "jpeg"])
+    uploaded_file = st.file_uploader("写真をアップロード", type=["jpg","png","jpeg"])
 
     st.header("✍️ 文字の設定")
     user_text = st.text_area("本文", value="", placeholder="メッセージを入力...")
@@ -137,74 +127,80 @@ with st.sidebar:
     if st.button("🔄 画面を強制リセット"):
         st.rerun()
 
-# --- 4. ベース画像生成 ---
+# ========== メイン ==========
 st.title("📱 メモリアルフォト＆メッセージ")
 
+# ベース画像（背景色 + 枠）を生成
 base_paper = build_base_paper(int(W), int(H), bg_rgb, frame_path)
+base_paper_url = pil_to_data_url(base_paper)
 
-# ✅ 核心的修正: PIL画像ではなく「base64 data URL」を background_image に渡す
-# st_canvas の一部バージョンはPIL直渡しで黒背景になるバグがある
-bg_data_url = pil_to_base64_url(base_paper)
+# ✅ 核心的修正:
+# st_canvas の background_image は使わず「透明キャンバス」にする。
+# 代わりに CSS position:absolute で背景画像をキャンバスの下に重ねる。
+st.markdown(f"""
+<style>
+/* キャンバスのラッパーを相対配置 */
+div[data-testid="stCanvasV2"] > div,
+.element-container:has(canvas) > div {{
+    position: relative !important;
+}}
 
-# プレビュー用にベース画像をHTMLで事前表示（キャンバスの後ろに敷く）
-st.markdown(
-    f"""
-    <style>
-    /* キャンバスのコンテナを相対配置にして背景を重ねる */
-    .canvas-container {{
-        position: relative;
-        display: inline-block;
-    }}
-    /* background_imageが黒になる場合の保険: CSSで背景を直接指定 */
-    canvas.lower-canvas {{
-        background-image: url("{bg_data_url}") !important;
-        background-size: 100% 100% !important;
-        background-color: rgb{bg_rgb} !important;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+/* 背景画像をキャンバスの下に絶対配置で表示 */
+div[data-testid="stCanvasV2"] > div::before,
+.element-container:has(canvas) > div::before {{
+    content: "";
+    position: absolute;
+    top: 0; left: 0;
+    width: {W}px;
+    height: {H}px;
+    background-image: url("{base_paper_url}");
+    background-size: 100% 100%;
+    z-index: 0;
+    pointer-events: none;
+}}
 
-# --- 5. キャンバスオブジェクト生成 ---
+/* キャンバス本体を透明にして背景が見えるようにする */
+canvas.lower-canvas {{
+    background: transparent !important;
+    background-color: transparent !important;
+}}
+canvas.upper-canvas {{
+    background: transparent !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# キャンバスオブジェクト
 objects_list = []
-
 if uploaded_file:
     p_img = Image.open(uploaded_file).convert("RGBA")
-    p_img = ImageOps.contain(p_img, (int(W * 0.8), int(H * 0.6)))
+    p_img = ImageOps.contain(p_img, (int(W*0.8), int(H*0.6)))
     objects_list.append({
         "type": "image",
-        "src": pil_to_base64_url(p_img),
+        "src": pil_to_data_url(p_img),
         "left": int((W - p_img.width) // 2),
         "top": 120,
-        "scaleX": 1,
-        "scaleY": 1,
+        "scaleX": 1, "scaleY": 1,
     })
-
 if user_text:
     t_img = prepare_text_image(user_text, text_size, text_color, W, FONTS[selected_font_name])
     objects_list.append({
         "type": "image",
-        "src": pil_to_base64_url(t_img),
+        "src": pil_to_data_url(t_img),
         "left": int((W - t_img.width) // 2),
         "top": int(H * 0.75),
-        "scaleX": 1,
-        "scaleY": 1,
+        "scaleX": 1, "scaleY": 1,
     })
 
-# --- 6. キャンバスキー ---
 bg_key = "_".join(map(str, bg_rgb))
-c_key = (
-    f"canvas_{bg_key}_{selected_frame_key}_{selected_size}"
-    f"_{'y' if uploaded_file else 'n'}_{len(user_text)}_{text_size}_{text_preset}"
-)
+c_key = f"cv_{bg_key}_{selected_frame_key}_{selected_size}_{'y' if uploaded_file else 'n'}_{len(user_text)}_{text_size}_{text_preset}"
 
-# ✅ background_image に base64 data URL 文字列を渡す（PILオブジェクトではなく）
 canvas_result = st_canvas(
-    fill_color="rgba(255, 255, 255, 0)",
+    fill_color="rgba(255,255,255,0)",
     stroke_width=0,
-    background_image=base_paper,       # PILオブジェクトも念のため渡す
-    background_color=f"rgb{bg_rgb}",   # ✅ 追加: 色をフォールバックとして明示
+    # ✅ background_image=None にして透明キャンバスにする（黒背景バグを回避）
+    background_image=None,
+    background_color="rgba(0,0,0,0)",  # 完全透明
     initial_drawing={"objects": objects_list} if objects_list else None,
     height=int(H),
     width=int(W),
@@ -212,11 +208,12 @@ canvas_result = st_canvas(
     key=c_key,
 )
 
-# --- 7. 確定と保存 ---
+# ========== 確定と保存 ==========
 st.divider()
 if st.button("✨ デザインを確定する", use_container_width=True, type="primary"):
     if canvas_result.image_data is not None:
         final_layer = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
+        # ベース（背景+枠）の上にキャンバス描画内容を合成
         complete_page = Image.alpha_composite(base_paper, final_layer)
 
         st.success("✅ 準備完了！保存ボタンを押してください。")
@@ -224,16 +221,10 @@ if st.button("✨ デザインを確定する", use_container_width=True, type="
 
         buf_j = io.BytesIO()
         complete_page.convert("RGB").save(buf_j, format="JPEG", quality=95)
-        c1.download_button(
-            "📥 通常保存 (JPEG)", buf_j.getvalue(),
-            "memorial.jpg", "image/jpeg", use_container_width=True
-        )
+        c1.download_button("📥 通常保存 (JPEG)", buf_j.getvalue(), "memorial.jpg", "image/jpeg", use_container_width=True)
 
         buf_p = io.BytesIO()
         complete_page.convert("RGB").save(buf_p, format="PDF", resolution=100.0)
-        c2.download_button(
-            "📥 高画質保存 (PDF)", buf_p.getvalue(),
-            "memorial.pdf", "application/pdf", use_container_width=True
-        )
+        c2.download_button("📥 高画質保存 (PDF)", buf_p.getvalue(), "memorial.pdf", "application/pdf", use_container_width=True)
     else:
         st.warning("キャンバスにコンテンツがありません。")
