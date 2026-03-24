@@ -86,7 +86,8 @@ st.title("📱 メモリアルフォト＆メッセージ")
 
 # 💡 鍵の名前を工夫して強制リフレッシュ
 clean_bg = bg_color.replace('#', '')
-c_key = f"canvas_v21_{clean_bg}_{selected_frame_key}_{selected_size}"
+# 💡 写真を上げた瞬間や設定を変えた瞬間に、上の画面も強制リフレッシュさせます
+c_key = f"canvas_v23_{clean_bg}_{selected_frame_key}_{selected_size}_{'yes' if uploaded_file else 'no'}"
 
 canvas_result = st_canvas(
     fill_color="rgba(255, 255, 255, 0)",
