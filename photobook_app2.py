@@ -36,19 +36,22 @@ FRAME_FILES = {
     "枠1 (シンプル)": "waku.png",
     "枠2 (装飾)": "waku2.png"
 }
+# プリセット色 + カスタム選択肢
 PRESET_BG_COLORS = {
     "ホワイト ⚪": (255, 255, 255),
     "アイボリー 🍦": (245, 245, 240),
     "薄いグレー 🔘": (240, 240, 240),
     "セピア 📜": (224, 208, 176),
-    "ブラック ⚫": (0, 0, 0)
+    "ブラック ⚫": (0, 0, 0),
+    "🎨 カスタム": None,
 }
 PRESET_TEXT_COLORS = {
     "漆黒 ⚫": "#000000",
     "濃いグレー 🔘": "#333333",
     "ホワイト ⚪": "#FFFFFF",
     "ゴールド風 🟡": "#B8860B",
-    "ダークブラウン 🪵": "#3D2B1F"
+    "ダークブラウン 🪵": "#3D2B1F",
+    "🎨 カスタム": None,
 }
 FONTS = {
     "ゴシック体 (現代的)": "msgothic.ttc",
@@ -69,8 +72,11 @@ def pil_to_data_url(img):
     b64 = base64.b64encode(buf.getvalue()).decode()
     return f"data:image/png;base64,{b64}"
 
+def hex_to_rgb(hex_str: str) -> tuple:
+    hex_str = hex_str.lstrip("#")
+    return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+
 def build_base_paper(W, H, bg_rgb, frame_path):
-    """背景色 + 枠を合成したPIL画像"""
     base = Image.new("RGBA", (W, H), (*bg_rgb, 255))
     if frame_path:
         full_path = os.path.join(get_script_dir(), frame_path)
@@ -84,19 +90,63 @@ def build_base_paper(W, H, bg_rgb, frame_path):
             st.warning(f"枠ファイルが見つかりません: {full_path}")
     return base
 
-def prepare_text_image(text, size, color, target_w, f_path):
+def wrap_text(text: str, font, max_width: int, draw: ImageDraw.Draw) -> str:
+    """
+    テキストを max_width に収まるよう折り返す。
+    ユーザーが入力した改行（\n）は保持する。
+    """
+    lines = []
+    for paragraph in text.split("\n"):
+        if not paragraph:
+            lines.append("")
+            continue
+        words = list(paragraph)  # 日本語は1文字ずつ
+        current_line = ""
+        for char in words:
+            test_line = current_line + char
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            if bbox[2] - bbox[0] > max_width and current_line:
+                lines.append(current_line)
+                current_line = char
+            else:
+                current_line = test_line
+        if current_line:
+            lines.append(current_line)
+    return "\n".join(lines)
+
+def prepare_text_image(text: str, size: int, color: str, max_w: int, f_path: str) -> Image.Image:
+    """
+    テキストを max_w 幅で折り返してPIL画像に変換する。
+    color は "#RRGGBB" 形式。
+    """
     font_full_path = os.path.join(get_script_dir(), f_path)
     try:
         font = ImageFont.truetype(font_full_path, size) if os.path.exists(font_full_path) else ImageFont.load_default()
     except Exception:
         font = ImageFont.load_default()
-    dummy = Image.new("RGBA", (int(target_w), 500))
+
+    # 折り返し幅 = キャンバス幅の85%（余白確保）
+    wrap_width = int(max_w * 0.85)
+
+    # 折り返し計算用のダミー画像
+    dummy = Image.new("RGBA", (max_w * 2, 100))
     dd = ImageDraw.Draw(dummy)
-    bbox = dd.multiline_textbbox((0, 0), text, font=font, align="center")
-    tw, th = int(bbox[2]-bbox[0]+60), int(bbox[3]-bbox[1]+60)
-    txt_img = Image.new("RGBA", (max(tw,100), max(th,50)), (0,0,0,0))
+
+    wrapped_text = wrap_text(text, font, wrap_width, dd)
+
+    # 折り返し後のテキストサイズを計測
+    bbox = dd.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
+    tw = int(bbox[2] - bbox[0] + 60)
+    th = int(bbox[3] - bbox[1] + 60)
+
+    txt_img = Image.new("RGBA", (max(tw, 100), max(th, 50)), (0, 0, 0, 0))
     ImageDraw.Draw(txt_img).multiline_text(
-        (tw//2, th//2), text, font=font, fill=color, anchor="mm", align="center"
+        (tw // 2, th // 2),
+        wrapped_text,
+        font=font,
+        fill=color,
+        anchor="mm",
+        align="center"
     )
     return txt_img
 
@@ -107,18 +157,29 @@ with st.sidebar:
     W, H = PAPER_SIZES[selected_size]
     selected_frame_key = st.radio("装飾枠の選択", list(FRAME_FILES.keys()))
     frame_path = FRAME_FILES[selected_frame_key]
+
+    # --- 背景色 ---
     bg_preset = st.selectbox("背景色", list(PRESET_BG_COLORS.keys()))
-    bg_rgb = PRESET_BG_COLORS[bg_preset]
+    if bg_preset == "🎨 カスタム":
+        bg_hex = st.color_picker("背景色を選択", "#FFFFFF", key="bg_custom")
+        bg_rgb = hex_to_rgb(bg_hex)
+    else:
+        bg_rgb = PRESET_BG_COLORS[bg_preset]
 
     st.header("📸 写真の設定")
     uploaded_file = st.file_uploader("写真をアップロード", type=["jpg","png","jpeg"])
 
     st.header("✍️ 文字の設定")
-    user_text = st.text_area("本文", value="", placeholder="メッセージを入力...")
+    user_text = st.text_area("本文", value="", placeholder="メッセージを入力...\n（長い文章は自動で折り返されます）")
     selected_font_name = st.selectbox("フォント", list(FONTS.keys()))
     text_size = st.slider("文字のサイズ", 10, 120, 45)
+
+    # --- 文字色 ---
     text_preset = st.selectbox("文字の色", list(PRESET_TEXT_COLORS.keys()))
-    text_color = PRESET_TEXT_COLORS[text_preset]
+    if text_preset == "🎨 カスタム":
+        text_color = st.color_picker("文字色を選択", "#000000", key="text_custom")
+    else:
+        text_color = PRESET_TEXT_COLORS[text_preset]
 
     st.divider()
     if st.button("🔄 画面を強制リセット"):
@@ -127,22 +188,18 @@ with st.sidebar:
 # ========== メイン ==========
 st.title("📱 メモリアルフォト＆メッセージ")
 
-# ベース画像（背景色 + 枠）
 base_paper = build_base_paper(int(W), int(H), bg_rgb, frame_path)
 base_paper_url = pil_to_data_url(base_paper)
 
-# ✅ 背景をキャンバスオブジェクトの「最初の要素（最背面）」として配置
-# selectable=False, evented=False にして操作不可にする
+# 背景をオブジェクトの最背面に（選択・移動不可）
 objects_list = [
     {
         "type": "image",
         "src": base_paper_url,
-        "left": 0,
-        "top": 0,
-        "scaleX": 1,
-        "scaleY": 1,
-        "selectable": False,       # ✅ 選択不可
-        "evented": False,          # ✅ イベント無効（クリックしても反応しない）
+        "left": 0, "top": 0,
+        "scaleX": 1, "scaleY": 1,
+        "selectable": False,
+        "evented": False,
         "lockMovementX": True,
         "lockMovementY": True,
         "lockRotation": True,
@@ -165,7 +222,9 @@ if uploaded_file:
     })
 
 if user_text:
-    t_img = prepare_text_image(user_text, text_size, text_color, W, FONTS[selected_font_name])
+    t_img = prepare_text_image(
+        user_text, text_size, text_color, W, FONTS[selected_font_name]
+    )
     objects_list.append({
         "type": "image",
         "src": pil_to_data_url(t_img),
@@ -175,16 +234,17 @@ if user_text:
     })
 
 bg_key = "_".join(map(str, bg_rgb))
+# カスタム色対応のため text_color の文字列もキーに含める
 c_key = (
     f"cv_{bg_key}_{selected_frame_key}_{selected_size}"
-    f"_{'y' if uploaded_file else 'n'}_{len(user_text)}_{text_size}_{text_preset}"
+    f"_{'y' if uploaded_file else 'n'}_{len(user_text)}_{text_size}_{text_color.replace('#','')}"
 )
 
 canvas_result = st_canvas(
     fill_color="rgba(255,255,255,0)",
     stroke_width=0,
-    background_image=None,              # ✅ 使わない
-    background_color="rgba(0,0,0,0)",   # ✅ 透明
+    background_image=None,
+    background_color="rgba(0,0,0,0)",
     initial_drawing={"objects": objects_list},
     height=int(H),
     width=int(W),
@@ -197,7 +257,6 @@ st.divider()
 if st.button("✨ デザインを確定する", use_container_width=True, type="primary"):
     if canvas_result.image_data is not None:
         final_layer = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
-        # ✅ 保存時は Python 側で base_paper と合成（キャンバスの背景オブジェクトは含まれるが念のため）
         complete_page = Image.alpha_composite(base_paper, final_layer)
 
         st.success("✅ 準備完了！保存ボタンを押してください。")
