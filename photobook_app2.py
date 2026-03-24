@@ -57,23 +57,20 @@ FONTS = {
 
 st.set_page_config(page_title="プロ・メモリアルエディタ", layout="wide")
 
-# --- ユーティリティ ---
 def get_script_dir():
     try:
         return os.path.dirname(os.path.abspath(__file__))
     except Exception:
         return os.getcwd()
 
-def pil_to_b64(img: Image.Image) -> str:
+def pil_to_data_url(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
-
-def pil_to_data_url(img: Image.Image) -> str:
-    return f"data:image/png;base64,{pil_to_b64(img)}"
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
 
 def build_base_paper(W, H, bg_rgb, frame_path):
-    """背景色 + 枠を合成したPIL画像を返す"""
+    """背景色 + 枠を合成したPIL画像"""
     base = Image.new("RGBA", (W, H), (*bg_rgb, 255))
     if frame_path:
         full_path = os.path.join(get_script_dir(), frame_path)
@@ -130,48 +127,32 @@ with st.sidebar:
 # ========== メイン ==========
 st.title("📱 メモリアルフォト＆メッセージ")
 
-# ベース画像（背景色 + 枠）を生成
+# ベース画像（背景色 + 枠）
 base_paper = build_base_paper(int(W), int(H), bg_rgb, frame_path)
 base_paper_url = pil_to_data_url(base_paper)
 
-# ✅ 核心的修正:
-# st_canvas の background_image は使わず「透明キャンバス」にする。
-# 代わりに CSS position:absolute で背景画像をキャンバスの下に重ねる。
-st.markdown(f"""
-<style>
-/* キャンバスのラッパーを相対配置 */
-div[data-testid="stCanvasV2"] > div,
-.element-container:has(canvas) > div {{
-    position: relative !important;
-}}
+# ✅ 背景をキャンバスオブジェクトの「最初の要素（最背面）」として配置
+# selectable=False, evented=False にして操作不可にする
+objects_list = [
+    {
+        "type": "image",
+        "src": base_paper_url,
+        "left": 0,
+        "top": 0,
+        "scaleX": 1,
+        "scaleY": 1,
+        "selectable": False,       # ✅ 選択不可
+        "evented": False,          # ✅ イベント無効（クリックしても反応しない）
+        "lockMovementX": True,
+        "lockMovementY": True,
+        "lockRotation": True,
+        "lockScalingX": True,
+        "lockScalingY": True,
+        "hasControls": False,
+        "hasBorders": False,
+    }
+]
 
-/* 背景画像をキャンバスの下に絶対配置で表示 */
-div[data-testid="stCanvasV2"] > div::before,
-.element-container:has(canvas) > div::before {{
-    content: "";
-    position: absolute;
-    top: 0; left: 0;
-    width: {W}px;
-    height: {H}px;
-    background-image: url("{base_paper_url}");
-    background-size: 100% 100%;
-    z-index: 0;
-    pointer-events: none;
-}}
-
-/* キャンバス本体を透明にして背景が見えるようにする */
-canvas.lower-canvas {{
-    background: transparent !important;
-    background-color: transparent !important;
-}}
-canvas.upper-canvas {{
-    background: transparent !important;
-}}
-</style>
-""", unsafe_allow_html=True)
-
-# キャンバスオブジェクト
-objects_list = []
 if uploaded_file:
     p_img = Image.open(uploaded_file).convert("RGBA")
     p_img = ImageOps.contain(p_img, (int(W*0.8), int(H*0.6)))
@@ -182,6 +163,7 @@ if uploaded_file:
         "top": 120,
         "scaleX": 1, "scaleY": 1,
     })
+
 if user_text:
     t_img = prepare_text_image(user_text, text_size, text_color, W, FONTS[selected_font_name])
     objects_list.append({
@@ -193,15 +175,17 @@ if user_text:
     })
 
 bg_key = "_".join(map(str, bg_rgb))
-c_key = f"cv_{bg_key}_{selected_frame_key}_{selected_size}_{'y' if uploaded_file else 'n'}_{len(user_text)}_{text_size}_{text_preset}"
+c_key = (
+    f"cv_{bg_key}_{selected_frame_key}_{selected_size}"
+    f"_{'y' if uploaded_file else 'n'}_{len(user_text)}_{text_size}_{text_preset}"
+)
 
 canvas_result = st_canvas(
     fill_color="rgba(255,255,255,0)",
     stroke_width=0,
-    # ✅ background_image=None にして透明キャンバスにする（黒背景バグを回避）
-    background_image=None,
-    background_color="rgba(0,0,0,0)",  # 完全透明
-    initial_drawing={"objects": objects_list} if objects_list else None,
+    background_image=None,              # ✅ 使わない
+    background_color="rgba(0,0,0,0)",   # ✅ 透明
+    initial_drawing={"objects": objects_list},
     height=int(H),
     width=int(W),
     drawing_mode="transform",
@@ -213,7 +197,7 @@ st.divider()
 if st.button("✨ デザインを確定する", use_container_width=True, type="primary"):
     if canvas_result.image_data is not None:
         final_layer = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
-        # ベース（背景+枠）の上にキャンバス描画内容を合成
+        # ✅ 保存時は Python 側で base_paper と合成（キャンバスの背景オブジェクトは含まれるが念のため）
         complete_page = Image.alpha_composite(base_paper, final_layer)
 
         st.success("✅ 準備完了！保存ボタンを押してください。")
