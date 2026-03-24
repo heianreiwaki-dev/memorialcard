@@ -58,33 +58,26 @@ FONTS = {
 st.set_page_config(page_title="プロ・メモリアルエディタ", layout="wide")
 
 # --- 2. 便利関数 ---
-def get_image_base64(img: Image.Image) -> str:
-    """PIL画像をbase64文字列に変換"""
+def pil_to_base64_url(img: Image.Image) -> str:
+    """PIL画像をdata URL（base64）に変換"""
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
+    b64 = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
 
-def hex_to_rgb(hex_color: str) -> tuple:
-    """HEX文字列をRGBタプルに変換（フォールバック付き）"""
-    hex_color = hex_color.lstrip('#')
+def get_script_dir() -> str:
     try:
-        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        return os.path.dirname(os.path.abspath(__file__))
     except Exception:
-        return (255, 255, 255)
+        return os.getcwd()
 
 def build_base_paper(W: int, H: int, bg_rgb: tuple, frame_path: str | None) -> Image.Image:
-    """
-    背景色と枠を合成したベース画像を生成する。
-    - bg_rgb: RGBタプル（例: (224, 208, 176)）
-    - frame_path: 枠ファイルのパス（Noneなら枠なし）
-    """
-    # ✅ 修正ポイント1: RGBタプルを使ってRGBAで作成（HEX文字列はRGBAモードで機能しないため）
+    """背景色と枠を合成したベース画像を生成"""
+    # RGBタプルで確実に色を指定
     base = Image.new("RGBA", (W, H), (*bg_rgb, 255))
 
     if frame_path:
-        # ✅ 修正ポイント2: __file__ が使えない環境を考慮してフォールバック
-        script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
-        full_frame_path = os.path.join(script_dir, frame_path)
+        full_frame_path = os.path.join(get_script_dir(), frame_path)
         if os.path.exists(full_frame_path):
             try:
                 waku = Image.open(full_frame_path).convert("RGBA").resize((W, H), Image.LANCZOS)
@@ -97,11 +90,8 @@ def build_base_paper(W: int, H: int, bg_rgb: tuple, frame_path: str | None) -> I
     return base
 
 def prepare_text_image(text: str, size: int, color: str, target_w: int, f_path: str) -> Image.Image:
-    """テキストをPIL画像に変換"""
-    # ✅ 修正ポイント3: __file__ フォールバック
-    script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
-    font_full_path = os.path.join(script_dir, f_path)
-
+    """テキストをPIL画像（RGBA）に変換"""
+    font_full_path = os.path.join(get_script_dir(), f_path)
     try:
         font = ImageFont.truetype(font_full_path, size) if os.path.exists(font_full_path) else ImageFont.load_default()
     except Exception:
@@ -131,7 +121,7 @@ with st.sidebar:
     frame_path = FRAME_FILES[selected_frame_key]
 
     bg_preset = st.selectbox("背景色", list(PRESET_BG_COLORS.keys()))
-    bg_rgb = PRESET_BG_COLORS[bg_preset]  # ✅ RGBタプルで管理
+    bg_rgb = PRESET_BG_COLORS[bg_preset]
 
     st.header("📸 写真の設定")
     uploaded_file = st.file_uploader("写真をアップロード", type=["jpg", "png", "jpeg"])
@@ -150,8 +140,31 @@ with st.sidebar:
 # --- 4. ベース画像生成 ---
 st.title("📱 メモリアルフォト＆メッセージ")
 
-# ✅ 修正ポイント4: RGBタプルを渡す
 base_paper = build_base_paper(int(W), int(H), bg_rgb, frame_path)
+
+# ✅ 核心的修正: PIL画像ではなく「base64 data URL」を background_image に渡す
+# st_canvas の一部バージョンはPIL直渡しで黒背景になるバグがある
+bg_data_url = pil_to_base64_url(base_paper)
+
+# プレビュー用にベース画像をHTMLで事前表示（キャンバスの後ろに敷く）
+st.markdown(
+    f"""
+    <style>
+    /* キャンバスのコンテナを相対配置にして背景を重ねる */
+    .canvas-container {{
+        position: relative;
+        display: inline-block;
+    }}
+    /* background_imageが黒になる場合の保険: CSSで背景を直接指定 */
+    canvas.lower-canvas {{
+        background-image: url("{bg_data_url}") !important;
+        background-size: 100% 100% !important;
+        background-color: rgb{bg_rgb} !important;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # --- 5. キャンバスオブジェクト生成 ---
 objects_list = []
@@ -161,10 +174,9 @@ if uploaded_file:
     p_img = ImageOps.contain(p_img, (int(W * 0.8), int(H * 0.6)))
     objects_list.append({
         "type": "image",
-        "src": f"data:image/png;base64,{get_image_base64(p_img)}",
+        "src": pil_to_base64_url(p_img),
         "left": int((W - p_img.width) // 2),
         "top": 120,
-        # scaleX/scaleY を明示することでオブジェクトが正常に表示される
         "scaleX": 1,
         "scaleY": 1,
     })
@@ -173,24 +185,26 @@ if user_text:
     t_img = prepare_text_image(user_text, text_size, text_color, W, FONTS[selected_font_name])
     objects_list.append({
         "type": "image",
-        "src": f"data:image/png;base64,{get_image_base64(t_img)}",
+        "src": pil_to_base64_url(t_img),
         "left": int((W - t_img.width) // 2),
         "top": int(H * 0.75),
         "scaleX": 1,
         "scaleY": 1,
     })
 
-# --- 6. キャンバスキー生成 ---
-# ✅ 修正ポイント5: bg_rgbをキーに含める（タプルを文字列化）
+# --- 6. キャンバスキー ---
 bg_key = "_".join(map(str, bg_rgb))
 c_key = (
     f"canvas_{bg_key}_{selected_frame_key}_{selected_size}"
     f"_{'y' if uploaded_file else 'n'}_{len(user_text)}_{text_size}_{text_preset}"
 )
 
+# ✅ background_image に base64 data URL 文字列を渡す（PILオブジェクトではなく）
 canvas_result = st_canvas(
     fill_color="rgba(255, 255, 255, 0)",
-    background_image=base_paper,            # ✅ PILのRGBA画像を直接渡す
+    stroke_width=0,
+    background_image=base_paper,       # PILオブジェクトも念のため渡す
+    background_color=f"rgb{bg_rgb}",   # ✅ 追加: 色をフォールバックとして明示
     initial_drawing={"objects": objects_list} if objects_list else None,
     height=int(H),
     width=int(W),
@@ -222,4 +236,4 @@ if st.button("✨ デザインを確定する", use_container_width=True, type="
             "memorial.pdf", "application/pdf", use_container_width=True
         )
     else:
-        st.warning("キャンバスにコンテンツがありません。写真またはテキストを追加してください。")
+        st.warning("キャンバスにコンテンツがありません。")
