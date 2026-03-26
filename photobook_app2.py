@@ -1,10 +1,33 @@
 import streamlit as st
-from streamlit_drawable_canvas import st_canvas
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 import base64
 import os
 import io
 import numpy as np
+
+# ==========================================
+# ★ streamlit-drawable-canvas の互換パッチ
+#    image_to_url のシグネチャ変更に対応
+# ==========================================
+import streamlit.elements.image as _st_image
+
+_original_image_to_url = _st_image.image_to_url
+
+def _patched_image_to_url(image, width, clamp, channels, output_format, image_id, allow_emoji=False):
+    """width に int/float が来た場合でも動くようにする互換ラッパー"""
+    try:
+        return _original_image_to_url(image, width, clamp, channels, output_format, image_id, allow_emoji)
+    except TypeError:
+        # 引数の数が合わない古いバージョン向け
+        try:
+            return _original_image_to_url(image, width, clamp, channels, output_format, image_id)
+        except TypeError:
+            return _original_image_to_url(image, width, clamp, channels, output_format)
+
+_st_image.image_to_url = _patched_image_to_url
+
+# パッチ適用後にインポート
+from streamlit_drawable_canvas import st_canvas
 
 # ==========================================
 # 定数・設定
@@ -13,9 +36,9 @@ CARD_W = 560
 PADDING = 80
 CANVAS_W = CARD_W + PADDING * 2
 PHOTO_MAX_PX = 350
-CARD_INNER_PAD = 36 
+CARD_INNER_PAD = 36
 GAP = 12
-FONT_FILE = "msgothic.ttc" 
+FONT_FILE = "msgothic.ttc"
 
 CARDS_DIR = "cards"
 os.makedirs(CARDS_DIR, exist_ok=True)
@@ -35,7 +58,7 @@ DESIGNS = load_designs()
 def resize_pil(img, max_px):
     w, h = img.size
     r = max_px / max(w, h)
-    return img.resize((int(w*r), int(h*r)), Image.LANCZOS)
+    return img.resize((int(w * r), int(h * r)), Image.LANCZOS)
 
 def pil_to_b64(img):
     buf = io.BytesIO()
@@ -44,18 +67,18 @@ def pil_to_b64(img):
 
 def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
     f_path_full = os.path.join(os.getcwd(), f_path)
-    low = 10
-    high = size
-    best_size = low
-    
+    low, high, best_size = 10, size, 10
+
     test_img = Image.new("RGBA", (int(target_w), 500))
     test_draw = ImageDraw.Draw(test_img)
 
     while low <= high:
         mid = (low + high) // 2
-        try: test_font = ImageFont.truetype(f_path_full, mid)
-        except: test_font = ImageFont.load_default()
-        
+        try:
+            test_font = ImageFont.truetype(f_path_full, mid)
+        except:
+            test_font = ImageFont.load_default()
+
         wrapped_text = ""
         current_line = ""
         for char in list(text):
@@ -66,19 +89,21 @@ def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
             else:
                 current_line = test_line
         wrapped_text += current_line
-        
+
         bbox = test_draw.multiline_textbbox((0, 0), wrapped_text, font=test_font, align="center")
         th = int(bbox[3] - bbox[1] + 40)
-        
+
         if th <= target_h:
             best_size = mid
             low = mid + 1
         else:
             high = mid - 1
-            
-    try: final_font = ImageFont.truetype(f_path_full, best_size)
-    except: final_font = ImageFont.load_default()
-    
+
+    try:
+        final_font = ImageFont.truetype(f_path_full, best_size)
+    except:
+        final_font = ImageFont.load_default()
+
     wrapped_text = ""
     current_line = ""
     for char in list(text):
@@ -92,21 +117,26 @@ def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
 
     bbox = test_draw.multiline_textbbox((0, 0), wrapped_text, font=final_font, align="center")
     tw, th = int(bbox[2] - bbox[0] + 60), int(bbox[3] - bbox[1] + 60)
-    
+
     txt_img = Image.new("RGBA", (max(tw, 100), max(th, 50)), (0, 0, 0, 0))
-    ImageDraw.Draw(txt_img).multiline_text((tw//2, th//2), wrapped_text, font=final_font, fill=color, anchor="mm", align="center")
+    ImageDraw.Draw(txt_img).multiline_text(
+        (tw // 2, th // 2), wrapped_text,
+        font=final_font, fill=color, anchor="mm", align="center"
+    )
     return txt_img, best_size
 
 def make_bg(design_name):
     path = DESIGNS.get(design_name)
     if path and os.path.exists(path):
-        bg = Image.open(path).convert("RGBA")
+        bg = Image.open(path).convert("RGB")
     else:
-        bg = Image.new("RGBA", (CARD_W, 400), (245, 240, 225, 255))
-    
+        bg = Image.new("RGB", (CARD_W, 400), (245, 240, 225))
+
     card_h = int(CARD_W * bg.height / bg.width)
     canvas_h = card_h + PADDING * 2
-    canvas = Image.new("RGBA", (CANVAS_W, canvas_h), (240, 235, 230, 255))
+
+    # ★ RGB で作成（st_canvas は RGB PIL を期待する）
+    canvas = Image.new("RGB", (CANVAS_W, canvas_h), (240, 235, 230))
     canvas.paste(bg.resize((CARD_W, card_h)), (PADDING, PADDING))
     return canvas, card_h, canvas_h
 
@@ -129,43 +159,37 @@ def auto_layout(photo_infos, text_defs, card_w, card_h):
         ph_area_h = ah
 
     rects = []
-    if n == 1: rects = [(x0, y0, aw, ph_area_h)]
+    if n == 1:
+        rects = [(x0, y0, aw, ph_area_h)]
     elif n >= 2:
         cols = 2 if n <= 4 else 3
         rows = (n + cols - 1) // cols
-        pw, ph = (aw - GAP * (cols - 1)) // cols, (ph_area_h - GAP * (rows - 1)) // rows
-        for i in range(n): rects.append((x0 + (i % cols) * (pw + GAP), y0 + (i // cols) * (ph + GAP), pw, ph))
+        pw = (aw - GAP * (cols - 1)) // cols
+        ph = (ph_area_h - GAP * (rows - 1)) // rows
+        for i in range(n):
+            rects.append((x0 + (i % cols) * (pw + GAP), y0 + (i // cols) * (ph + GAP), pw, ph))
 
     for info, (rx, ry, rw, rh) in zip(photo_infos, rects):
         scale = min(rw / info["w"], rh / info["h"])
         objects.append({
             "type": "image", "src": info["src"],
-            "left": int(rx + (rw - info["w"]*scale)//2), "top": int(ry + (rh - info["h"]*scale)//2),
-            "scaleX": scale, "scaleY": scale, "originX": "left", "originY": "top"
+            "left": int(rx + (rw - info["w"] * scale) // 2),
+            "top": int(ry + (rh - info["h"] * scale) // 2),
+            "scaleX": scale, "scaleY": scale,
+            "originX": "left", "originY": "top"
         })
-    
+
     if all_text:
         ty = y0 + ph_area_h + GAP
         color = text_defs[0].get("fill", "#333333") if text_defs else "#333333"
-        txt_img, best_size = prepare_text_image_fitting(all_text, 32, color, aw, text_zone_h, FONT_FILE)
+        txt_img, _ = prepare_text_image_fitting(all_text, 32, color, aw, text_zone_h, FONT_FILE)
         objects.append({
             "type": "image", "src": pil_to_b64(txt_img),
-            "left": x0 + (aw - txt_img.width)//2, "top": ty + (text_zone_h - txt_img.height)//2,
+            "left": x0 + (aw - txt_img.width) // 2,
+            "top": ty + (text_zone_h - txt_img.height) // 2,
             "originX": "left", "originY": "top"
         })
     return objects
-
-# ==========================================
-# ★ 背景をRGBのPIL画像として渡すヘルパー
-#    streamlit-drawable-canvas は RGBA を受け付けないバージョンがある
-# ==========================================
-def make_bg_rgb(design_name):
-    """st_canvas の background_image 用に RGB PIL 画像を返す"""
-    canvas_rgba, card_h, canvas_h = make_bg(design_name)
-    # RGBA → RGB（白マット合成）
-    bg_rgb = Image.new("RGB", canvas_rgba.size, (240, 235, 230))
-    bg_rgb.paste(canvas_rgba, mask=canvas_rgba.split()[3])  # アルファチャンネルでマスク
-    return bg_rgb, card_h, canvas_h
 
 # ==========================================
 # UI
@@ -199,7 +223,8 @@ with st.sidebar:
             for f in new_fs:
                 c = resize_pil(Image.open(f).convert("RGBA"), PHOTO_MAX_PX)
                 st.session_state.processed[f.name] = {"src": pil_to_b64(c), "w": c.width, "h": c.height}
-            st.session_state.canvas_key += 1; st.rerun()
+            st.session_state.canvas_key += 1
+            st.rerun()
 
     st.divider()
     st.header("✍️ 文字を追加")
@@ -207,7 +232,8 @@ with st.sidebar:
     t_color = st.color_picker("文字色", "#333333")
     if st.button("📝 文字を登録"):
         st.session_state.text_defs.append({"type": "i-text", "text": msg, "fill": t_color})
-        st.session_state.canvas_key += 1; st.rerun()
+        st.session_state.canvas_key += 1
+        st.rerun()
 
     st.divider()
     st.session_state.mode = st.radio("配置モード", ["手動", "AIで自動レイアウト"])
@@ -217,23 +243,22 @@ with st.sidebar:
             list(st.session_state.processed.values()),
             st.session_state.text_defs, CARD_W, card_h_tmp
         )
-        st.session_state.canvas_key += 1; st.rerun()
+        st.session_state.canvas_key += 1
+        st.rerun()
 
     if st.button("🔄 リセット"):
         for k in ["canvas_objects", "processed", "text_defs"]:
             st.session_state[k] = [] if k != "processed" else {}
-        st.session_state.canvas_key += 1; st.rerun()
+        st.session_state.canvas_key += 1
+        st.rerun()
 
 # --- メインエリア ---
-# ★ RGB PIL画像を使用（RGBAではなくRGBで渡す）
-bg_pil_rgb, card_h, canvas_h = make_bg_rgb(st.session_state.design)
-# 合成用にRGBA版も保持
-bg_pil_rgba, _, _ = make_bg(st.session_state.design)
+bg_pil, card_h, canvas_h = make_bg(st.session_state.design)
 
 st.subheader("2. 写真・文字を配置してください")
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
-    background_image=bg_pil_rgb,        # ★ RGB PIL画像を渡す
+    background_image=bg_pil,            # ★ RGB PIL画像（パッチ適用済みなので動作する）
     initial_drawing={"objects": st.session_state.canvas_objects},
     height=canvas_h,
     width=CANVAS_W,
@@ -245,7 +270,8 @@ canvas_result = st_canvas(
 if st.button("✅ 完成画像を確定する", type="primary", use_container_width=True):
     if canvas_result.image_data is not None:
         rgba = Image.fromarray(canvas_result.image_data.astype(np.uint8), "RGBA")
-        merged = Image.alpha_composite(bg_pil_rgba.convert("RGBA"), rgba)
+        bg_rgba = bg_pil.convert("RGBA")
+        merged = Image.alpha_composite(bg_rgba, rgba)
         final = merged.crop((PADDING, PADDING, PADDING + CARD_W, PADDING + card_h)).convert("RGB")
         st.image(final, caption="完成プレビュー", use_container_width=True)
         buf = io.BytesIO()
