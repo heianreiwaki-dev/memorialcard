@@ -6,23 +6,6 @@ import os
 import io
 import numpy as np
 
-# --- Streamlit用パッチ (クラウド環境での画像表示エラーを回避) ---
-import streamlit.elements.image as st_image
-import streamlit.elements.lib.image_utils as image_utils
-if not hasattr(st_image, "image_to_url"):
-    st_image.image_to_url = image_utils.image_to_url
-class FakeLayoutConfig:
-    def __init__(self, width):
-        self.width = width
-        self.use_container_width = False
-original_image_to_url = st_image.image_to_url
-def patched_image_to_url(image, width_or_config, *args, **kwargs):
-    if isinstance(width_or_config, (int, float)):
-        width_or_config = FakeLayoutConfig(int(width_or_config))
-    return original_image_to_url(image, width_or_config, *args, **kwargs)
-st_image.image_to_url = patched_image_to_url
-image_utils.image_to_url = patched_image_to_url
-
 # ==========================================
 # 定数・設定
 # ==========================================
@@ -55,15 +38,11 @@ def resize_pil(img, max_px):
     return img.resize((int(w*r), int(h*r)), Image.LANCZOS)
 
 def pil_to_b64(img):
-    """画像をBase64形式の文字列に変換する"""
     buf = io.BytesIO()
     img.convert("RGBA").save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
-    """
-    💡 文字が指定の枠（target_h）に収まるまでフォントサイズを自動調整する
-    """
     f_path_full = os.path.join(os.getcwd(), f_path)
     low = 10
     high = size
@@ -123,13 +102,10 @@ def make_bg(design_name):
     if path and os.path.exists(path):
         bg = Image.open(path).convert("RGBA")
     else:
-        # デフォルトベージュ
         bg = Image.new("RGBA", (CARD_W, 400), (245, 240, 225, 255))
     
     card_h = int(CARD_W * bg.height / bg.width)
     canvas_h = card_h + PADDING * 2
-
-    # ★ 修正: キャンバス全体（パディング含む）を1枚の画像として合成
     canvas = Image.new("RGBA", (CANVAS_W, canvas_h), (240, 235, 230, 255))
     canvas.paste(bg.resize((CARD_W, card_h)), (PADDING, PADDING))
     return canvas, card_h, canvas_h
@@ -180,17 +156,35 @@ def auto_layout(photo_infos, text_defs, card_w, card_h):
     return objects
 
 # ==========================================
+# ★ 背景をRGBのPIL画像として渡すヘルパー
+#    streamlit-drawable-canvas は RGBA を受け付けないバージョンがある
+# ==========================================
+def make_bg_rgb(design_name):
+    """st_canvas の background_image 用に RGB PIL 画像を返す"""
+    canvas_rgba, card_h, canvas_h = make_bg(design_name)
+    # RGBA → RGB（白マット合成）
+    bg_rgb = Image.new("RGB", canvas_rgba.size, (240, 235, 230))
+    bg_rgb.paste(canvas_rgba, mask=canvas_rgba.split()[3])  # アルファチャンネルでマスク
+    return bg_rgb, card_h, canvas_h
+
+# ==========================================
 # UI
 # ==========================================
 st.set_page_config(page_title="プロ・メモリアルカード", layout="wide")
 st.title("🕯️ プロ・メモリアルカード (AI自動レイアウト版)")
 
 if "canvas_objects" not in st.session_state:
-    st.session_state.update({"canvas_objects": [], "processed": {}, "canvas_key": 0, "design": list(DESIGNS.keys())[0], "text_defs": [], "mode": "手動"})
+    st.session_state.update({
+        "canvas_objects": [], "processed": {}, "canvas_key": 0,
+        "design": list(DESIGNS.keys())[0], "text_defs": [], "mode": "手動"
+    })
 
 with st.sidebar:
     st.header("🖼️ 背景デザイン")
-    new_design = st.selectbox("デザイン切替", list(DESIGNS.keys()), index=list(DESIGNS.keys()).index(st.session_state.design))
+    new_design = st.selectbox(
+        "デザイン切替", list(DESIGNS.keys()),
+        index=list(DESIGNS.keys()).index(st.session_state.design)
+    )
     if new_design != st.session_state.design:
         st.session_state.design = new_design
         st.session_state.canvas_key += 1
@@ -219,26 +213,31 @@ with st.sidebar:
     st.session_state.mode = st.radio("配置モード", ["手動", "AIで自動レイアウト"])
     if st.session_state.mode == "AIで自動レイアウト" and st.button("🤖 自動レイアウトを適用", type="primary"):
         _, card_h_tmp, _ = make_bg(st.session_state.design)
-        st.session_state.canvas_objects = auto_layout(list(st.session_state.processed.values()), st.session_state.text_defs, CARD_W, card_h_tmp)
+        st.session_state.canvas_objects = auto_layout(
+            list(st.session_state.processed.values()),
+            st.session_state.text_defs, CARD_W, card_h_tmp
+        )
         st.session_state.canvas_key += 1; st.rerun()
 
     if st.button("🔄 リセット"):
-        for k in ["canvas_objects", "processed", "text_defs"]: st.session_state[k] = [] if k != "processed" else {}
+        for k in ["canvas_objects", "processed", "text_defs"]:
+            st.session_state[k] = [] if k != "processed" else {}
         st.session_state.canvas_key += 1; st.rerun()
 
 # --- メインエリア ---
-bg_pil, card_h, canvas_h = make_bg(st.session_state.design)
-
-# ★ 修正ポイント: background_image(PIL)ではなく background_url(Base64文字列)を使用
-bg_b64_url = pil_to_b64(bg_pil)
+# ★ RGB PIL画像を使用（RGBAではなくRGBで渡す）
+bg_pil_rgb, card_h, canvas_h = make_bg_rgb(st.session_state.design)
+# 合成用にRGBA版も保持
+bg_pil_rgba, _, _ = make_bg(st.session_state.design)
 
 st.subheader("2. 写真・文字を配置してください")
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
-    background_url=bg_b64_url,          # ← ここを変更（PIL→Base64 URL）
-    # background_image=bg_pil,          # ← この行を削除（PIL渡しは廃止）
+    background_image=bg_pil_rgb,        # ★ RGB PIL画像を渡す
     initial_drawing={"objects": st.session_state.canvas_objects},
-    height=canvas_h, width=CANVAS_W, drawing_mode="transform",
+    height=canvas_h,
+    width=CANVAS_W,
+    drawing_mode="transform",
     key=f"cv_{st.session_state.design}_{st.session_state.canvas_key}"
 )
 
@@ -246,8 +245,9 @@ canvas_result = st_canvas(
 if st.button("✅ 完成画像を確定する", type="primary", use_container_width=True):
     if canvas_result.image_data is not None:
         rgba = Image.fromarray(canvas_result.image_data.astype(np.uint8), "RGBA")
-        merged = Image.alpha_composite(bg_pil.convert("RGBA"), rgba)
+        merged = Image.alpha_composite(bg_pil_rgba.convert("RGBA"), rgba)
         final = merged.crop((PADDING, PADDING, PADDING + CARD_W, PADDING + card_h)).convert("RGB")
         st.image(final, caption="完成プレビュー", use_container_width=True)
-        buf = io.BytesIO(); final.save(buf, format="JPEG", quality=95)
+        buf = io.BytesIO()
+        final.save(buf, format="JPEG", quality=95)
         st.download_button("📥 ダウンロード", buf.getvalue(), "card.jpg", "image/jpeg")
