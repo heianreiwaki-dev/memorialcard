@@ -36,7 +36,7 @@ GAP = 12
 
 st.set_page_config(page_title="プロ・メモリアルエディタ", layout="wide")
 
-# 💡 記憶の保管場所（Session State）の初期化
+# 記憶の保管場所（Session State）の初期化
 if "saved_text_img_url" not in st.session_state:
     st.session_state.saved_text_img_url = None
 if "current_font_size" not in st.session_state:
@@ -77,7 +77,6 @@ def wrap_text(text: str, font, max_width: int):
     return "\n".join(lines)
 
 def create_text_image(text, size, color, max_w, font_name, max_h=None):
-    """テキスト画像を生成する共通関数（max_h指定で自動縮小）"""
     font_p = os.path.join(os.path.dirname(__file__), FONTS[font_name])
     current_size = size
     while current_size > 10:
@@ -89,7 +88,6 @@ def create_text_image(text, size, color, max_w, font_name, max_h=None):
         bbox = draw.multiline_textbbox((0,0), wrapped, font=f_obj)
         tw, th = bbox[2]-bbox[0]+40, bbox[3]-bbox[1]+40
         
-        # 高さ指定がある場合、収まるまでサイズを落とす
         if max_h and th > max_h:
             current_size -= 2; continue
         
@@ -116,7 +114,9 @@ with st.sidebar:
     st.header("✍️ 文字の設定")
     user_text = st.text_area("本文", value="", height=100)
     
-    # 💡 入力直後の「文字を反映」ボタン
+    # 💡 修正：ボタンより先にフォント選択を定義します
+    selected_font_name = st.selectbox("フォント", list(FONTS.keys()))
+
     if st.button("📝 文字を反映・更新", type="primary", use_container_width=True):
         if user_text:
             url, final_s = create_text_image(user_text, st.session_state.current_font_size, "#000000", W, selected_font_name)
@@ -124,8 +124,6 @@ with st.sidebar:
             st.session_state.refresh_key += 1
             st.rerun()
 
-    selected_font_name = st.selectbox("フォント", list(FONTS.keys()))
-    # スライダーが動いたらサイズを記憶
     new_size = st.slider("基本の文字サイズ", 10, 120, st.session_state.current_font_size)
     if new_size != st.session_state.current_font_size:
         st.session_state.current_font_size = new_size
@@ -134,15 +132,12 @@ with st.sidebar:
     text_color = st.color_picker("カスタム文字色", "#000000") if text_preset == "🎨 カスタム" else PRESET_TEXT_COLORS[text_preset]
 
     st.divider()
-    # 💡 自動調整ボタン
     if st.button("🤖 写真と文字枠を自動調整", use_container_width=True):
         if user_text and uploaded_file:
-            # 写真サイズを仮定して残りの高さを計算
             p_img = ImageOps.contain(Image.open(uploaded_file).convert("RGBA"), (int(W*0.8), int(H*0.6)))
             safe_h = (H - (CARD_INNER_PAD + 20)) - (100 + p_img.height + GAP)
             url, final_s = create_text_image(user_text, st.session_state.current_font_size, text_color, W - 100, selected_font_name, max_h=safe_h)
             
-            # 💡 結果を記憶（セッション）に保存
             st.session_state.saved_text_img_url = url
             st.session_state.current_font_size = final_s
             st.session_state.refresh_key += 1
@@ -156,31 +151,26 @@ with st.sidebar:
 # ========== 4. メインエリア ==========
 st.title("📱 メモリアルフォト＆メッセージ")
 
-# 背景
 base_paper = build_base_paper(int(W), int(H), bg_rgb, FRAME_FILES[selected_frame_key])
 base_url = pil_to_data_url(base_paper)
 objects_list = [{"type": "image", "src": base_url, "left": 0, "top": 0, "selectable": False, "evented": False}]
 
-# 写真
 if uploaded_file:
     p_img = ImageOps.contain(Image.open(uploaded_file).convert("RGBA"), (int(W*0.8), int(H*0.6)))
     objects_list.append({"type": "image", "src": pil_to_data_url(p_img), "left": (W - p_img.width)//2, "top": 100})
 
-# 💡 文字（記憶にある場合はそれを使い、なければ新規作成）
 if user_text:
     if st.session_state.saved_text_img_url is None:
-        # 初回またはリセット後
         url, _ = create_text_image(user_text, st.session_state.current_font_size, text_color, W, selected_font_name)
         st.session_state.saved_text_img_url = url
     
     objects_list.append({
         "type": "image", 
         "src": st.session_state.saved_text_img_url, 
-        "left": (W - 200)//2, # 中央付近
-        "top": H - 250        # 下部付近
+        "left": (W - 200)//2,
+        "top": H - 250
     })
 
-# キャンバス表示
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
     background_color="#eeeeee",
@@ -190,7 +180,6 @@ canvas_result = st_canvas(
     key=f"canvas_{st.session_state.refresh_key}_{selected_size}_{selected_frame_key}",
 )
 
-# 保存
 st.divider()
 if st.button("✨ デザインを確定する", use_container_width=True, type="primary"):
     if canvas_result.image_data is not None:
