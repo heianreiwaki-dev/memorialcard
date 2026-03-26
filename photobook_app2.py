@@ -65,7 +65,6 @@ def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
     💡 文字が指定の枠（target_h）に収まるまでフォントサイズを自動調整する
     """
     f_path_full = os.path.join(os.getcwd(), f_path)
-    # フォントサイズの探索範囲
     low = 10
     high = size
     best_size = low
@@ -78,7 +77,6 @@ def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
         try: test_font = ImageFont.truetype(f_path_full, mid)
         except: test_font = ImageFont.load_default()
         
-        # 折り返し計算
         wrapped_text = ""
         current_line = ""
         for char in list(text):
@@ -102,7 +100,6 @@ def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
     try: final_font = ImageFont.truetype(f_path_full, best_size)
     except: final_font = ImageFont.load_default()
     
-    # 最終的な折り返し
     wrapped_text = ""
     current_line = ""
     for char in list(text):
@@ -131,6 +128,8 @@ def make_bg(design_name):
     
     card_h = int(CARD_W * bg.height / bg.width)
     canvas_h = card_h + PADDING * 2
+
+    # ★ 修正: キャンバス全体（パディング含む）を1枚の画像として合成
     canvas = Image.new("RGBA", (CANVAS_W, canvas_h), (240, 235, 230, 255))
     canvas.paste(bg.resize((CARD_W, card_h)), (PADDING, PADDING))
     return canvas, card_h, canvas_h
@@ -229,13 +228,15 @@ with st.sidebar:
 
 # --- メインエリア ---
 bg_pil, card_h, canvas_h = make_bg(st.session_state.design)
-# 💡 修正：画像をBase64形式にしてからキャンバスに渡す
-bg_data = pil_to_b64(bg_pil)
+
+# ★ 修正ポイント: background_image(PIL)ではなく background_url(Base64文字列)を使用
+bg_b64_url = pil_to_b64(bg_pil)
 
 st.subheader("2. 写真・文字を配置してください")
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
-    background_image=bg_pil, # PIL形式
+    background_url=bg_b64_url,          # ← ここを変更（PIL→Base64 URL）
+    # background_image=bg_pil,          # ← この行を削除（PIL渡しは廃止）
     initial_drawing={"objects": st.session_state.canvas_objects},
     height=canvas_h, width=CANVAS_W, drawing_mode="transform",
     key=f"cv_{st.session_state.design}_{st.session_state.canvas_key}"
