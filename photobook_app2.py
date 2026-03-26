@@ -1,13 +1,12 @@
 import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-import io
-import os
 import base64
+import os
+import io
+import numpy as np
 
-# ==========================================
-# 🚨 エラー回避パッチ
-# ==========================================
+# --- Streamlit用パッチ (背景表示エラー回避) ---
 import streamlit.elements.image as st_image
 import streamlit.elements.lib.image_utils as image_utils
 if not hasattr(st_image, "image_to_url"):
@@ -24,173 +23,343 @@ def patched_image_to_url(image, width_or_config, *args, **kwargs):
 st_image.image_to_url = patched_image_to_url
 image_utils.image_to_url = patched_image_to_url
 
-# --- 1. 定数・設定 ---
-PAPER_SIZES = {"2L版 (127x178mm)": (600, 840), "L版 (89x127mm)": (420, 600), "ハガキ (100x148mm)": (472, 700), "A4 (210x297mm)": (700, 990)}
-FRAME_FILES = {"枠なし": None, "枠1 (シンプル)": "waku.png", "枠2 (装飾)": "waku2.png"}
-PRESET_BG_COLORS = {"ホワイト ⚪": (255, 255, 255), "アイボリー 🍦": (245, 245, 240), "薄いグレー 🔘": (240, 240, 240), "セピア 📜": (224, 208, 176), "ブラック ⚫": (0, 0, 0), "🎨 カスタム": None}
-PRESET_TEXT_COLORS = {"漆黒 ⚫": "#000000", "濃いグレー 🔘": "#333333", "ホワイト ⚪": "#FFFFFF", "ゴールド風 🟡": "#B8860B", "ダークブラウン 🪵": "#3D2B1F", "🎨 カスタム": None}
-FONTS = {"ゴシック体 (現代的)": "msgothic.ttc", "明朝体 (厳か)": "msmincho.ttc"}
+# ==========================================
+# 定数・設定
+# ==========================================
+CARD_W = 560
+PADDING = 80
+CANVAS_W = CARD_W + PADDING * 2
+PHOTO_MAX_PX = 350
+CARD_INNER_PAD = 36 # デザイン枠の太さ目安
+GAP = 12
 
-CARD_INNER_PAD = 36 
-GAP = 12 
+# 背景デザインの読み込み
+CARDS_DIR = "cards"
+if not os.path.exists(CARDS_DIR):
+    os.makedirs(CARDS_DIR)
 
-st.set_page_config(page_title="プロ・メモリアルエディタ", layout="wide")
+def load_designs():
+    exts = (".jpg", ".jpeg", ".png")
+    files = sorted([f for f in os.listdir(CARDS_DIR) if f.lower().endswith(exts)])
+    if not files: return {"（デフォルト）": None}
+    return {os.path.splitext(f)[0]: os.path.join(CARDS_DIR, f) for f in files}
 
-# 記憶の保管場所（Session State）の初期化
-if "saved_text_img_url" not in st.session_state:
-    st.session_state.saved_text_img_url = None
-if "current_font_size" not in st.session_state:
-    st.session_state.current_font_size = 45
-if "refresh_key" not in st.session_state:
-    st.session_state.refresh_key = 0
+DESIGNS = load_designs()
 
-# --- 2. 関数群 ---
-def pil_to_data_url(img):
+# 💡 フォント指定（GitHubに上げたファイル名に合わせてください）
+FONT_FILE = "msgothic.ttc" 
+
+# ==========================================
+# ユーティリティ
+# ==========================================
+def resize_pil(img, max_px):
+    w, h = img.size
+    if max(w, h) <= max_px: return img
+    r = max_px / max(w, h)
+    return img.resize((int(w*r), int(h*r)), Image.LANCZOS)
+
+def pil_to_b64(img):
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+    # 透過PNGとして保存してBase64化
+    img.convert("RGBA").save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
-def build_base_paper(W, H, bg_rgb, frame_path):
-    base = Image.new("RGBA", (W, H), (*bg_rgb, 255))
-    if frame_path:
-        full_path = os.path.join(os.path.dirname(__file__), frame_path)
-        if os.path.exists(full_path):
-            waku = Image.open(full_path).convert("RGBA").resize((W, H), Image.LANCZOS)
-            base = Image.alpha_composite(base, waku)
-    return base
+def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
+    """
+    💡 文字がターゲットの矩形に収まるまで、フォントサイズを自動的に縮小調整する
+    """
+    f_path_full = os.path.join(os.getcwd(), f_path)
+    # Binary Searchで最適なフォントサイズを見つける
+    low = 10
+    high = size
+    best_size = low
+    
+    test_img = Image.new("RGBA", (int(target_w), 500))
+    test_draw = ImageDraw.Draw(test_img)
 
-def wrap_text(text: str, font, max_width: int):
-    lines = []
-    draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
-    for paragraph in text.split("\n"):
-        if not paragraph:
-            lines.append(""); continue
+    while low <= high:
+        mid = (low + high) // 2
+        try: test_font = ImageFont.truetype(f_path_full, mid)
+        except: test_font = ImageFont.load_default()
+        
+        # 簡易的な折り返し計算
+        wrapped_text = ""
         current_line = ""
-        for char in list(paragraph):
+        for char in list(text):
             test_line = current_line + char
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            if bbox[2] - bbox[0] > max_width and current_line:
-                lines.append(current_line); current_line = char
+            if test_draw.textbbox((0, 0), test_line, font=test_font)[2] > target_w * 0.95:
+                wrapped_text += current_line + "\n"
+                current_line = char
             else:
                 current_line = test_line
-        if current_line: lines.append(current_line)
-    return "\n".join(lines)
+        wrapped_text += current_line
+        
+        # 収まるか確認
+        bbox = test_draw.multiline_textbbox((0, 0), wrapped_text, font=test_font, align="center")
+        tw, th = int(bbox[2] - bbox[0] + 60), int(bbox[3] - bbox[1] + 60)
+        
+        if tw <= target_w and th <= target_h:
+            best_size = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+            
+    # 最適なサイズでレンダリング
+    try: final_font = ImageFont.truetype(f_path_full, best_size)
+    except: final_font = ImageFont.load_default()
+    
+    # 再度折り返し計算
+    test_img = Image.new("RGBA", (int(target_w), 500))
+    test_draw = ImageDraw.Draw(test_img)
+    wrapped_text = ""
+    current_line = ""
+    for char in list(text):
+        test_line = current_line + char
+        if test_draw.textbbox((0, 0), test_line, font=final_font)[2] > target_w * 0.95:
+            wrapped_text += current_line + "\n"
+            current_line = char
+        else:
+            current_line = test_line
+    wrapped_text += current_line
 
-def create_text_image(text, size, color, max_w, font_name, max_h=None):
-    font_p = os.path.join(os.path.dirname(__file__), FONTS[font_name])
-    current_size = size
-    while current_size > 10:
-        try: f_obj = ImageFont.truetype(font_p, current_size)
-        except: f_obj = ImageFont.load_default()
-        
-        wrapped = wrap_text(text, f_obj, max_w - 60)
-        draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
-        bbox = draw.multiline_textbbox((0,0), wrapped, font=f_obj)
-        tw, th = bbox[2]-bbox[0]+40, bbox[3]-bbox[1]+40
-        
-        if max_h and th > max_h:
-            current_size -= 2; continue
-        
-        img = Image.new("RGBA", (int(tw), int(th)), (0,0,0,0))
-        ImageDraw.Draw(img).multiline_text((tw//2, th//2), wrapped, font=f_obj, fill=color, anchor="mm", align="center")
-        return pil_to_data_url(img), current_size
-    return None, 10
+    bbox = test_draw.multiline_textbbox((0, 0), wrapped_text, font=final_font, align="center")
+    tw, th = int(bbox[2] - bbox[0] + 60), int(bbox[3] - bbox[1] + 60)
+    
+    txt_img = Image.new("RGBA", (max(tw, 100), max(th, 50)), (0, 0, 0, 0))
+    txt_draw = ImageDraw.Draw(txt_img)
+    txt_draw.multiline_text((tw//2, th//2), wrapped_text, font=final_font, fill=color, anchor="mm", align="center")
+    return txt_img, best_size
 
-# ========== 3. サイドバー ==========
+def make_bg(design_name):
+    path = DESIGNS.get(design_name)
+    if path and os.path.exists(path):
+        bg = Image.open(path).convert("RGBA")
+    else:
+        bg = Image.new("RGBA", (CARD_W, 400), (245, 245, 240, 255))
+    
+    card_h = int(CARD_W * bg.height / bg.width)
+    canvas_h = card_h + PADDING * 2
+    canvas = Image.new("RGBA", (CANVAS_W, canvas_h), (210, 205, 200, 255))
+    # 背景の土台
+    canvas.paste(bg.resize((CARD_W, card_h)), (PADDING, PADDING))
+    return canvas, card_h, canvas_h
+
+# ==========================================
+# 🤖 自動レイアウトロジック
+# ==========================================
+def auto_layout(photo_infos, text_defs, card_w, card_h):
+    n = len(photo_infos)
+    objects = []
+    margin = CARD_INNER_PAD + 15
+    x0, y0 = PADDING + margin, PADDING + margin
+    aw, ah = card_w - margin * 2, card_h - margin * 2
+
+    # テキストエリアを下部に確保
+    all_text = "\n".join([t.get("text", "") for t in text_defs])
+    if all_text:
+        # 文字数が多い場合はテキストエリアを ah の最大50%まで確保
+        text_zone_h = max(int(ah * 0.3), int(ah * min(0.5, len(all_text) / 200)))
+        ph_area_h = ah - text_zone_h - GAP
+        ph_area_h = max(ph_area_h, 40) # 最小限の写真エリア
+    else:
+        text_zone_h = 0
+        ph_area_h = ah
+
+    # 写真枠の分割
+    def split(cols, rows, area_w, area_h, base_x, base_y):
+        pw = (area_w - GAP * (cols - 1)) // cols
+        ph = (area_h - GAP * (rows - 1)) // rows
+        rects = []
+        for r in range(rows):
+            for c in range(cols):
+                rects.append((base_x + c*(pw+GAP), base_y + r*(ph+GAP), pw, ph))
+        return rects
+
+    rects = []
+    if n == 1: rects = [(x0, y0, aw, ph_area_h)]
+    elif n == 2: rects = split(2, 1, aw, ph_area_h, x0, y0)
+    elif n == 3:
+        # 左に大きく1枚、右に縦2枚
+        pw_l = int(aw * 0.55) - GAP // 2
+        pw_r = aw - pw_l - GAP
+        ph_r = (ph_area_h - GAP) // 2
+        rects = [
+            (x0, y0, pw_l, ph_area_h),
+            (x0 + pw_l + GAP, y0, pw_r, ph_r),
+            (x0 + pw_l + GAP, y0 + ph_r + GAP, pw_r, ph_r)
+        ]
+    elif n == 4: rects = split(2, 2, aw, ph_area_h, x0, y0)
+    else:
+        # それ以上はグリッド配置
+        cols = 3
+        rows = (n + cols - 1) // cols
+        rects = split(cols, rows, aw, ph_area_h, x0, y0)
+
+    # 写真オブジェクト追加
+    for info, (rx, ry, rw, rh) in zip(photo_infos, rects):
+        scale = min(rw / info["w"], rh / info["h"])
+        objects.append({
+            "type": "image", "src": info["src"],
+            "left": int(rx + (rw - info["w"]*scale)//2),
+            "top": int(ry + (rh - info["h"]*scale)//2),
+            "scaleX": scale, "scaleY": scale, "originX": "left", "originY": "top"
+        })
+    
+    # 💡 文字オブジェクト生成：Safe Area内に収める
+    if all_text:
+        ty = y0 + ph_area_h + GAP
+        color = text_defs[0].get("fill", "#333333") if text_defs else "#333333" 
+        # Safe Areaの矩形に合わせて画像を生成
+        txt_img, fitted_size = prepare_text_image_fitting(
+            all_text, 36, color, aw, text_zone_h, FONT_FILE
+        )
+        objects.append({
+            "type": "image", "src": pil_to_b64(txt_img),
+            # テキストエリアの中央下部に配置
+            "left": x0 + (aw - txt_img.width)//2,
+            "top": ty + (text_zone_h - txt_img.height)//2,
+            "originX": "left", "originY": "top"
+        })
+        st.info(f"🤖 自動レイアウト：文字全体がSafe Areaに収まるように、フォントサイズを {fitted_size}px に縮小調整しました。")
+        
+    return objects
+
+# ==========================================
+# メイン UI
+# ==========================================
+st.set_page_config(page_title="プロ・メモリアルカード", layout="wide")
+st.title("🕯️ プロ・メモリアルカード (AI自動レイアウト版)")
+
+# セッション初期化
+if "canvas_objects" not in st.session_state:
+    st.session_state.canvas_objects = []
+    st.session_state.processed = {} # ファイル名: info
+    st.session_state.canvas_key = 0
+    st.session_state.mode = "手動"
+    st.session_state.design = list(DESIGNS.keys())[0]
+    st.session_state.text_defs = [] # 自動モード用テキスト素材リスト
+
 with st.sidebar:
-    st.header("📋 基本設定")
-    selected_size = st.selectbox("出力サイズ", list(PAPER_SIZES.keys()))
-    W, H = PAPER_SIZES[selected_size]
-    selected_frame_key = st.radio("装飾枠の選択", list(FRAME_FILES.keys()))
-    
-    bg_preset = st.selectbox("背景色", list(PRESET_BG_COLORS.keys()))
-    if bg_preset == "🎨 カスタム":
-        bg_rgb = tuple(int(st.color_picker("背景色", "#FFFFFF").lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
-    else: bg_rgb = PRESET_BG_COLORS[bg_preset]
+    st.header("🛠️ 素材設定")
 
-    st.header("📸 写真の設定")
-    uploaded_file = st.file_uploader("写真をアップロード", type=["jpg","png","jpeg"])
-
-    st.header("✍️ 文字の設定")
-    user_text = st.text_area("本文", value="", height=100)
-    
-    # 💡 修正：ボタンより先にフォント選択を定義します
-    selected_font_name = st.selectbox("フォント", list(FONTS.keys()))
-
-    if st.button("📝 文字を反映・更新", type="primary", use_container_width=True):
-        if user_text:
-            url, final_s = create_text_image(user_text, st.session_state.current_font_size, "#000000", W, selected_font_name)
-            st.session_state.saved_text_img_url = url
-            st.session_state.refresh_key += 1
-            st.rerun()
-
-    new_size = st.slider("基本の文字サイズ", 10, 120, st.session_state.current_font_size)
-    if new_size != st.session_state.current_font_size:
-        st.session_state.current_font_size = new_size
-
-    text_preset = st.selectbox("文字の色", list(PRESET_TEXT_COLORS.keys()))
-    text_color = st.color_picker("カスタム文字色", "#000000") if text_preset == "🎨 カスタム" else PRESET_TEXT_COLORS[text_preset]
+    # 背景デザイン
+    st.subheader("🖼️ 背景デザイン")
+    design_names = list(DESIGNS.keys())
+    st.session_state.design = st.selectbox("デザイン切替", design_names, index=design_names.index(st.session_state.design))
 
     st.divider()
-    if st.button("🤖 写真と文字枠を自動調整", use_container_width=True):
-        if user_text and uploaded_file:
-            p_img = ImageOps.contain(Image.open(uploaded_file).convert("RGBA"), (int(W*0.8), int(H*0.6)))
-            safe_h = (H - (CARD_INNER_PAD + 20)) - (100 + p_img.height + GAP)
-            url, final_s = create_text_image(user_text, st.session_state.current_font_size, text_color, W - 100, selected_font_name, max_h=safe_h)
-            
-            st.session_state.saved_text_img_url = url
-            st.session_state.current_font_size = final_s
-            st.session_state.refresh_key += 1
+
+    # 写真追加
+    st.subheader("📷 写真を追加")
+    uploaded_files = st.file_uploader("写真を選択 (複数可)", accept_multiple_files=True)
+    if uploaded_files:
+        new_files = [f for f in uploaded_files if f.name not in st.session_state.processed]
+        if new_files and st.button(f"🖼️ {len(new_files)}枚を反映"):
+            for f in new_files:
+                pil = Image.open(f).convert("RGBA")
+                c = resize_pil(pil, PHOTO_MAX_PX)
+                info = {"src": pil_to_b64(c), "w": c.width, "h": c.height}
+                st.session_state.processed[f.name] = info
+                # 手動モードならキャンバスに追加
+                if st.session_state.mode == "手動":
+                    st.session_state.canvas_objects.append({
+                        "type": "image", "src": info["src"],
+                        "left": PADDING + 60, "top": PADDING + 60,
+                        "scaleX": 1.0, "scaleY": 1.0
+                    })
+            if st.session_state.mode == "AIで自動レイアウト":
+                st.info("🤖 「AIで自動レイアウト」を適用を押してください")
+            st.session_state.canvas_key += 1
             st.rerun()
 
-    if st.button("🔄 全部リセット", use_container_width=True):
-        st.session_state.saved_text_img_url = None
-        st.session_state.refresh_key += 1
+    st.divider()
+
+    # 文字追加
+    st.subheader("✍️ 文字を追加")
+    # 長文対応のためtext_areaに変更
+    msg = st.text_area("文字入力", "想い出をありがとう。")
+    col1, col2 = st.columns([2, 1])
+    with col1: t_color = st.color_picker("文字色", "#333333")
+    with col2: font_size = st.number_input("サイズ", 12, 100, 28)
+
+    if st.button("📝 文字を追加"):
+        if msg:
+            text_obj = {
+                "type": "i-text", "text": msg, "fill": t_color,
+                "fontFamily": "ゴシック体", "fontSize": font_size,
+                "left": PADDING + 80, "top": CANVAS_W//2
+            }
+            if st.session_state.mode == "AIで自動レイアウト":
+                st.session_state.text_defs.append(text_obj)
+                st.info("🤖 「AIで自動レイアウト」を適用を押してください")
+            else:
+                st.session_state.canvas_objects.append(text_obj)
+            st.session_state.canvas_key += 1
+            st.rerun()
+
+    if st.session_state.text_defs and st.session_state.mode == "AIで自動レイアウト":
+        st.caption(f"✍️ 自動モード用素材: {len(st.session_state.text_defs)}件")
+
+    st.divider()
+
+    # 自動レイアウト
+    st.subheader("🤖 レイアウトモード")
+    st.session_state.mode = st.radio("配置モード", ["手動", "AIで自動レイアウト"])
+    
+    if st.session_state.mode == "AIで自動レイアウト":
+        if st.button("🤖 自動レイアウトを適用", type="primary", use_container_width=True):
+            p_infos = list(st.session_state.processed.values())
+            t_defs = st.session_state.text_defs
+            if not p_infos and not t_defs:
+                st.warning("写真または文字を追加してください。")
+            else:
+                # 一時的な背景取得でahを計算
+                _, card_h_tmp, _ = make_bg(st.session_state.design)
+                new_objects = auto_layout(p_infos, t_defs, CARD_W, card_h_tmp)
+                st.session_state.canvas_objects = new_objects
+                st.session_state.canvas_key += 1
+                st.rerun()
+
+    st.divider()
+    # リセット
+    if st.button("🔄 全部リセット", type="secondary"):
+        for k in ["canvas_objects", "processed", "text_defs"]:
+            st.session_state[k] = [] if k != "processed" else {}
+        st.session_state.canvas_key += 1
         st.rerun()
 
-# ========== 4. メインエリア ==========
-st.title("📱 メモリアルフォト＆メッセージ")
+# --- メインエリア ---
+# キャンバス表示
+bg_img, card_h, canvas_h = make_bg(st.session_state.design)
 
-base_paper = build_base_paper(int(W), int(H), bg_rgb, FRAME_FILES[selected_frame_key])
-base_url = pil_to_data_url(base_paper)
-objects_list = [{"type": "image", "src": base_url, "left": 0, "top": 0, "selectable": False, "evented": False}]
+st.subheader("2. 写真・文字を配置してください")
+st.caption("💡 ドラッグ: 移動　四隅□: 拡大縮小　上○: 回転　ダブルクリック: テキスト編集")
 
-if uploaded_file:
-    p_img = ImageOps.contain(Image.open(uploaded_file).convert("RGBA"), (int(W*0.8), int(H*0.6)))
-    objects_list.append({"type": "image", "src": pil_to_data_url(p_img), "left": (W - p_img.width)//2, "top": 100})
-
-if user_text:
-    if st.session_state.saved_text_img_url is None:
-        url, _ = create_text_image(user_text, st.session_state.current_font_size, text_color, W, selected_font_name)
-        st.session_state.saved_text_img_url = url
-    
-    objects_list.append({
-        "type": "image", 
-        "src": st.session_state.saved_text_img_url, 
-        "left": (W - 200)//2,
-        "top": H - 250
-    })
+# 💡 デザイン変更時にキャンバスをリセットして背景を更新
+c_key = f"canvas_{st.session_state.design}_{st.session_state.canvas_key}"
 
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
-    background_color="#eeeeee",
-    initial_drawing={"objects": objects_list},
-    height=int(H), width=int(W),
+    background_image=bg_img,
+    initial_drawing={"objects": st.session_state.canvas_objects},
+    height=canvas_h, width=CANVAS_W,
     drawing_mode="transform",
-    key=f"canvas_{st.session_state.refresh_key}_{selected_size}_{selected_frame_key}",
+    key=c_key,
 )
 
+# 確定・保存
 st.divider()
-if st.button("✨ デザインを確定する", use_container_width=True, type="primary"):
+if st.button("✅ 完成画像を確定する", type="primary", use_container_width=True):
     if canvas_result.image_data is not None:
-        final_layer = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
-        complete_page = Image.new("RGB", (int(W), int(H)), (255, 255, 255))
-        complete_page.paste(base_paper.convert("RGB"))
-        complete_page.paste(final_layer, mask=final_layer.split()[3])
+        rgba = Image.fromarray(canvas_result.image_data.astype(np.uint8), "RGBA")
+        merged = Image.alpha_composite(bg_img.convert("RGBA"), rgba)
+        # 透過背景を白にする
+        final_merged = Image.new("RGBA", merged.size, "white")
+        final_merged.paste(merged, (0,0), merged)
+        # カード部分をトリミング
+        final = final_merged.crop((PADDING, PADDING, PADDING + CARD_W, PADDING + card_h)).convert("RGB")
         
-        st.success("✅ 保存の準備ができました")
-        c1, c2 = st.columns(2)
-        buf_j = io.BytesIO(); complete_page.save(buf_j, format="JPEG", quality=95)
-        c1.download_button("📥 JPEG保存", buf_j.getvalue(), "memorial.jpg", "image/jpeg", use_container_width=True)
-        buf_p = io.BytesIO(); complete_page.save(buf_p, format="PDF", resolution=100.0)
-        c2.download_button("📥 PDF保存", buf_p.getvalue(), "memorial.pdf", "application/pdf", use_container_width=True)
+        st.image(final, caption="完成プレビュー", use_container_width=True)
+        buf = io.BytesIO()
+        final.save(buf, format="JPEG", quality=95)
+        st.download_button("📥 完成品をダウンロード (JPEG)", buf.getvalue(), "memorial_card.jpg", "image/jpeg")
