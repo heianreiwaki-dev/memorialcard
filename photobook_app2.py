@@ -31,17 +31,17 @@ PRESET_BG_COLORS = {"ホワイト ⚪": (255, 255, 255), "アイボリー 🍦":
 PRESET_TEXT_COLORS = {"漆黒 ⚫": "#000000", "濃いグレー 🔘": "#333333", "ホワイト ⚪": "#FFFFFF", "ゴールド風 🟡": "#B8860B", "ダークブラウン 🪵": "#3D2B1F", "🎨 カスタム": None}
 FONTS = {"ゴシック体 (現代的)": "msgothic.ttc", "明朝体 (厳か)": "msmincho.ttc"}
 
-# 枠の内側の余白（フレームにかからないようにする範囲）
-CARD_INNER_PAD = 40 
-GAP = 15 
+# 💡 枠の厚み（Safe Area）を少し広めの 60px に設定して安全を確保
+SAFE_MARGIN = 60 
+GAP = 20 
 
 st.set_page_config(page_title="プロ・メモリアルエディタ", layout="wide")
 
 # Session State の初期化
-if "saved_text_img_url" not in st.session_state:
-    st.session_state.saved_text_img_url = None
+if "saved_text_data" not in st.session_state:
+    st.session_state.saved_text_data = {"url": None, "top": 500, "left": 100}
 if "current_font_size" not in st.session_state:
-    st.session_state.current_font_size = 45
+    st.session_state.current_font_size = 40
 if "refresh_key" not in st.session_state:
     st.session_state.refresh_key = 0
 
@@ -61,7 +61,6 @@ def build_base_paper(W, H, bg_rgb, frame_path):
     return base
 
 def wrap_text(text: str, font, max_width: int):
-    """テキストを max_width に収まるよう、文字単位で折り返す。"""
     lines = []
     draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
     for paragraph in text.split("\n"):
@@ -79,31 +78,29 @@ def wrap_text(text: str, font, max_width: int):
     return "\n".join(lines)
 
 def create_text_image(text, size, color, max_w, font_name, max_h=None):
-    """指定されたエリア(max_w, max_h)に収まるまでサイズを縮小して生成"""
     font_p = os.path.join(os.path.dirname(__file__), FONTS[font_name])
     current_size = size
     
-    while current_size > 12: # 最小サイズまで
+    while current_size > 12:
         try: f_obj = ImageFont.truetype(font_p, current_size)
         except: f_obj = ImageFont.load_default()
         
-        # 折り返し計算
+        # 折り返し幅を Safe Area に合わせる
         wrapped = wrap_text(text, f_obj, max_w)
         draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
         bbox = draw.multiline_textbbox((0,0), wrapped, font=f_obj)
-        tw, th = bbox[2]-bbox[0]+20, bbox[3]-bbox[1]+20
+        tw, th = bbox[2]-bbox[0]+10, bbox[3]-bbox[1]+10
         
-        # 高さが指定されている場合、収まらなければサイズダウン
+        # 💡 高さがはみ出す場合は 2px ずつ下げる
         if max_h and th > max_h:
             current_size -= 2
             continue
         
-        # 収まったら描画
         img = Image.new("RGBA", (int(tw), int(th)), (0,0,0,0))
         ImageDraw.Draw(img).multiline_text((tw//2, th//2), wrapped, font=f_obj, fill=color, anchor="mm", align="center")
-        return pil_to_data_url(img), current_size
+        return pil_to_data_url(img), current_size, tw, th
     
-    return None, 12
+    return None, 12, 100, 50
 
 # ========== 3. サイドバー ==========
 with st.sidebar:
@@ -122,13 +119,13 @@ with st.sidebar:
     uploaded_file = st.file_uploader("写真をアップロード", type=["jpg","png","jpeg"])
 
     st.header("✍️ 文字の設定")
-    user_text = st.text_area("本文", value="", height=100, placeholder="メッセージを入力...")
+    user_text = st.text_area("本文", value="", height=100)
     selected_font_name = st.selectbox("フォント", list(FONTS.keys()))
 
     if st.button("📝 文字を反映・更新", type="primary", use_container_width=True):
         if user_text:
-            url, final_s = create_text_image(user_text, st.session_state.current_font_size, "#000000", W - (CARD_INNER_PAD * 2), selected_font_name)
-            st.session_state.saved_text_img_url = url
+            url, final_s, tw, th = create_text_image(user_text, st.session_state.current_font_size, "#000000", W - (SAFE_MARGIN * 2), selected_font_name)
+            st.session_state.saved_text_data.update({"url": url, "left": (W - tw)//2, "top": H - th - SAFE_MARGIN})
             st.session_state.refresh_key += 1
             st.rerun()
 
@@ -140,53 +137,54 @@ with st.sidebar:
     text_color = st.color_picker("カスタム文字色", "#000000") if text_preset == "🎨 カスタム" else PRESET_TEXT_COLORS[text_preset]
 
     st.divider()
-    # 💡 自動調整ボタン（枠の中に収める）
+    # 💡 枠の中に収める自動調整
     if st.button("🤖 写真と文字枠を自動調整", use_container_width=True):
         if user_text and uploaded_file:
-            # 1. 写真のサイズを取得（表示スケールに合わせる）
             p_img = ImageOps.contain(Image.open(uploaded_file).convert("RGBA"), (int(W*0.8), int(H*0.6)))
             
-            # 2. 枠内の残り高さを計算 (下部の枠まで)
-            # 全高 - (上部余白 + 写真高 + GAP + 下部枠余白)
-            safe_w = W - (CARD_INNER_PAD * 2)
-            safe_h = (H - CARD_INNER_PAD) - (100 + p_img.height + GAP)
+            # 💡 エリアの計算（枠の厚みを 60px と多めに見積もる）
+            safe_w = W - (SAFE_MARGIN * 2)
+            # 文字が入る高さ = 底の枠(SAFE_MARGIN) - 写真の底
+            photo_bottom = 100 + p_img.height
+            safe_h = (H - SAFE_MARGIN) - (photo_bottom + GAP)
             
-            url, final_s = create_text_image(user_text, st.session_state.current_font_size, text_color, safe_w, selected_font_name, max_h=safe_h)
+            url, final_s, tw, th = create_text_image(user_text, st.session_state.current_font_size, text_color, safe_w, selected_font_name, max_h=safe_h)
             
-            st.session_state.saved_text_img_url = url
+            # 文字を「写真の下」かつ「残りのエリアの中央」に配置
+            new_top = photo_bottom + GAP + (safe_h - th)//2
+            st.session_state.saved_text_data.update({"url": url, "left": (W - tw)//2, "top": new_top})
             st.session_state.current_font_size = final_s
             st.session_state.refresh_key += 1
             st.rerun()
 
     if st.button("🔄 全部リセット", use_container_width=True):
-        st.session_state.saved_text_img_url = None
+        st.session_state.saved_text_data = {"url": None, "top": 500, "left": 100}
         st.session_state.refresh_key += 1
         st.rerun()
 
 # ========== 4. メインエリア ==========
 st.title("📱 メモリアルフォト＆メッセージ")
 
-# 大元の背景・枠の仕組み
 base_paper = build_base_paper(int(W), int(H), bg_rgb, frame_path)
 base_url = pil_to_data_url(base_paper)
 objects_list = [{"type": "image", "src": base_url, "left": 0, "top": 0, "selectable": False, "evented": False}]
 
-# 写真
+# 写真（初期位置 100px）
 if uploaded_file:
     p_img = ImageOps.contain(Image.open(uploaded_file).convert("RGBA"), (int(W*0.8), int(H*0.6)))
     objects_list.append({"type": "image", "src": pil_to_data_url(p_img), "left": (W - p_img.width)//2, "top": 100})
 
 # 文字
 if user_text:
-    if st.session_state.saved_text_img_url is None:
-        url, _ = create_text_image(user_text, st.session_state.current_font_size, text_color, W - (CARD_INNER_PAD * 2), selected_font_name)
-        st.session_state.saved_text_img_url = url
+    if st.session_state.saved_text_data["url"] is None:
+        url, _, tw, th = create_text_image(user_text, st.session_state.current_font_size, text_color, W - (SAFE_MARGIN * 2), selected_font_name)
+        st.session_state.saved_text_data.update({"url": url, "left": (W - tw)//2, "top": H - th - SAFE_MARGIN})
     
     objects_list.append({
         "type": "image", 
-        "src": st.session_state.saved_text_img_url, 
-        "left": (W - 200)//2, # 一旦中央付近に。自動調整なら位置は以下で上書きされます
-        "top": H - 250
+        "src": st.session_state.saved_text_data["url"], 
+        "left": st.session_state.saved_text_data["left"],
+        "top": st.session_state.saved_text_data["top"]
     })
 
 canvas_result = st_canvas(
