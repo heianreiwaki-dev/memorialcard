@@ -1,33 +1,10 @@
 import streamlit as st
+from streamlit_drawable_canvas import st_canvas
 from PIL import Image, ImageDraw, ImageFont
 import base64
 import os
 import io
 import numpy as np
-
-# ==========================================
-# ★ streamlit-drawable-canvas の互換パッチ
-#    image_to_url のシグネチャ変更に対応
-# ==========================================
-import streamlit.elements.image as _st_image
-
-_original_image_to_url = _st_image.image_to_url
-
-def _patched_image_to_url(image, width, clamp, channels, output_format, image_id, allow_emoji=False):
-    """width に int/float が来た場合でも動くようにする互換ラッパー"""
-    try:
-        return _original_image_to_url(image, width, clamp, channels, output_format, image_id, allow_emoji)
-    except TypeError:
-        # 引数の数が合わない古いバージョン向け
-        try:
-            return _original_image_to_url(image, width, clamp, channels, output_format, image_id)
-        except TypeError:
-            return _original_image_to_url(image, width, clamp, channels, output_format)
-
-_st_image.image_to_url = _patched_image_to_url
-
-# パッチ適用後にインポート
-from streamlit_drawable_canvas import st_canvas
 
 # ==========================================
 # 定数・設定
@@ -64,6 +41,21 @@ def pil_to_b64(img):
     buf = io.BytesIO()
     img.convert("RGBA").save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+def make_bg_pil(design_name):
+    """背景PIL画像を生成（RGB）"""
+    path = DESIGNS.get(design_name)
+    if path and os.path.exists(path):
+        bg = Image.open(path).convert("RGB")
+    else:
+        bg = Image.new("RGB", (CARD_W, 400), (245, 240, 225))
+
+    card_h = int(CARD_W * bg.height / bg.width)
+    canvas_h = card_h + PADDING * 2
+
+    canvas = Image.new("RGB", (CANVAS_W, canvas_h), (240, 235, 230))
+    canvas.paste(bg.resize((CARD_W, card_h)), (PADDING, PADDING))
+    return canvas, card_h, canvas_h
 
 def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
     f_path_full = os.path.join(os.getcwd(), f_path)
@@ -125,24 +117,6 @@ def prepare_text_image_fitting(text, size, color, target_w, target_h, f_path):
     )
     return txt_img, best_size
 
-def make_bg(design_name):
-    path = DESIGNS.get(design_name)
-    if path and os.path.exists(path):
-        bg = Image.open(path).convert("RGB")
-    else:
-        bg = Image.new("RGB", (CARD_W, 400), (245, 240, 225))
-
-    card_h = int(CARD_W * bg.height / bg.width)
-    canvas_h = card_h + PADDING * 2
-
-    # ★ RGB で作成（st_canvas は RGB PIL を期待する）
-    canvas = Image.new("RGB", (CANVAS_W, canvas_h), (240, 235, 230))
-    canvas.paste(bg.resize((CARD_W, card_h)), (PADDING, PADDING))
-    return canvas, card_h, canvas_h
-
-# ==========================================
-# 🤖 自動レイアウト
-# ==========================================
 def auto_layout(photo_infos, text_defs, card_w, card_h):
     n = len(photo_infos)
     objects = []
@@ -165,9 +139,9 @@ def auto_layout(photo_infos, text_defs, card_w, card_h):
         cols = 2 if n <= 4 else 3
         rows = (n + cols - 1) // cols
         pw = (aw - GAP * (cols - 1)) // cols
-        ph = (ph_area_h - GAP * (rows - 1)) // rows
+        ph_h = (ph_area_h - GAP * (rows - 1)) // rows
         for i in range(n):
-            rects.append((x0 + (i % cols) * (pw + GAP), y0 + (i // cols) * (ph + GAP), pw, ph))
+            rects.append((x0 + (i % cols) * (pw + GAP), y0 + (i // cols) * (ph_h + GAP), pw, ph_h))
 
     for info, (rx, ry, rw, rh) in zip(photo_infos, rects):
         scale = min(rw / info["w"], rh / info["h"])
@@ -190,6 +164,38 @@ def auto_layout(photo_infos, text_defs, card_w, card_h):
             "originX": "left", "originY": "top"
         })
     return objects
+
+# ==========================================
+# ★ CSSで背景を上書きするヘルパー
+#    st_canvas の canvas要素の背景をBase64画像で設定する
+# ==========================================
+def inject_canvas_background(b64_url, canvas_w, canvas_h):
+    """JavaScriptでキャンバス要素の背景画像を直接設定する"""
+    js = f"""
+    <script>
+    (function() {{
+        function applyBg() {{
+            // streamlit-drawable-canvas の lower-canvas を探す
+            var canvases = window.parent.document.querySelectorAll('canvas.lower-canvas');
+            if (canvases.length === 0) {{
+                canvases = window.parent.document.querySelectorAll('canvas');
+            }}
+            canvases.forEach(function(c) {{
+                if (c.width === {canvas_w} || c.style.width === '{canvas_w}px') {{
+                    c.style.backgroundImage = "url('{b64_url}')";
+                    c.style.backgroundSize = '{canvas_w}px {canvas_h}px';
+                    c.style.backgroundRepeat = 'no-repeat';
+                }}
+            }});
+        }}
+        // 少し待ってから適用（レンダリング待ち）
+        setTimeout(applyBg, 300);
+        setTimeout(applyBg, 800);
+        setTimeout(applyBg, 1500);
+    }})();
+    </script>
+    """
+    st.components.v1.html(js, height=0)
 
 # ==========================================
 # UI
@@ -238,7 +244,7 @@ with st.sidebar:
     st.divider()
     st.session_state.mode = st.radio("配置モード", ["手動", "AIで自動レイアウト"])
     if st.session_state.mode == "AIで自動レイアウト" and st.button("🤖 自動レイアウトを適用", type="primary"):
-        _, card_h_tmp, _ = make_bg(st.session_state.design)
+        _, card_h_tmp, _ = make_bg_pil(st.session_state.design)
         st.session_state.canvas_objects = auto_layout(
             list(st.session_state.processed.values()),
             st.session_state.text_defs, CARD_W, card_h_tmp
@@ -253,18 +259,30 @@ with st.sidebar:
         st.rerun()
 
 # --- メインエリア ---
-bg_pil, card_h, canvas_h = make_bg(st.session_state.design)
+bg_pil, card_h, canvas_h = make_bg_pil(st.session_state.design)
+bg_b64 = pil_to_b64(bg_pil)
 
 st.subheader("2. 写真・文字を配置してください")
+
+# ★ background_image を一切使わず、stroke_color で透明・drawing_modeで操作のみ
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
-    background_image=bg_pil,            # ★ RGB PIL画像（パッチ適用済みなので動作する）
+    stroke_color="rgba(0,0,0,0)",
+    stroke_width=0,
+    background_color="#F0EBE6",         # ★ 単色フォールバック（画像なし）
     initial_drawing={"objects": st.session_state.canvas_objects},
     height=canvas_h,
     width=CANVAS_W,
     drawing_mode="transform",
     key=f"cv_{st.session_state.design}_{st.session_state.canvas_key}"
 )
+
+# ★ JSで背景画像をキャンバスに注入
+inject_canvas_background(bg_b64, CANVAS_W, canvas_h)
+
+# ★ 背景プレビューをキャンバスの下に表示（合成確認用）
+st.caption("※ 背景プレビュー（実際の配置はキャンバス上で確認してください）")
+st.image(bg_pil, width=CANVAS_W)
 
 # 保存
 if st.button("✅ 完成画像を確定する", type="primary", use_container_width=True):
